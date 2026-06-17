@@ -22,9 +22,10 @@ class Settings(BaseSettings):
     approval_email_sender: str = Field(default="")
 
     # AI — Phase 3
-    ai_provider: str = Field(default="none")   # "xai", "anthropic", or "none"
+    ai_provider: str = Field(default="none")   # "xai", "anthropic", "gemini", or "none"
     xai_api_key: str = Field(default="")
     anthropic_api_key: str = Field(default="")
+    gemini_api_key: str = Field(default="")
     ai_model: str = Field(default="")          # overrides provider default when set
 
     # LinkedIn — future phase

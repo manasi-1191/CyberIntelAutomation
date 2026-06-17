@@ -116,11 +116,213 @@ class TestAiProvider:
             from summarizer.ai_provider import get_ai_client
             assert get_ai_client() is None
 
+    def test_returns_none_when_gemini_key_missing(self):
+        with patch("config.settings.settings") as mock_settings:
+            mock_settings.ai_provider = "gemini"
+            mock_settings.gemini_api_key = ""
+            from summarizer.ai_provider import get_ai_client
+            assert get_ai_client() is None
+
     def test_returns_none_for_unknown_provider(self):
         with patch("config.settings.settings") as mock_settings:
             mock_settings.ai_provider = "openai"
             from summarizer.ai_provider import get_ai_client
             assert get_ai_client() is None
+
+    def test_gemini_client_uses_default_model(self):
+        """_GeminiClient defaults to gemini-2.5-flash when AI_MODEL is unset."""
+        import sys
+        import types
+
+        # Minimal stub so the ImportError check in __init__ passes
+        mock_genai = types.ModuleType("google.generativeai")
+        mock_google = types.ModuleType("google")
+        mock_google.generativeai = mock_genai
+
+        with patch.dict(sys.modules, {"google": mock_google, "google.generativeai": mock_genai}):
+            from summarizer.ai_provider import _GeminiClient
+            client = _GeminiClient(api_key="test-key", model="")
+            assert client.model == "gemini-2.5-flash"
+
+    def test_gemini_client_respects_model_override(self):
+        """AI_MODEL override is passed through to _GeminiClient."""
+        import sys
+        import types
+
+        mock_genai = types.ModuleType("google.generativeai")
+        mock_google = types.ModuleType("google")
+        mock_google.generativeai = mock_genai
+
+        with patch.dict(sys.modules, {"google": mock_google, "google.generativeai": mock_genai}):
+            from summarizer.ai_provider import _GeminiClient
+            client = _GeminiClient(api_key="test-key", model="gemini-2.0-flash")
+            assert client.model == "gemini-2.0-flash"
+
+    def test_gemini_complete_returns_text(self):
+        """_GeminiClient.complete() returns response.text from the Gemini SDK."""
+        import sys
+        import types
+        from unittest.mock import MagicMock
+
+        # Build a mock response with a .text attribute
+        mock_response = MagicMock()
+        mock_response.text = "Gemini summary output."
+
+        mock_model_instance = MagicMock()
+        mock_model_instance.generate_content.return_value = mock_response
+
+        mock_genai = MagicMock()
+        mock_genai.GenerativeModel.return_value = mock_model_instance
+
+        mock_google = types.ModuleType("google")
+        mock_google.generativeai = mock_genai
+
+        with patch.dict(sys.modules, {"google": mock_google, "google.generativeai": mock_genai}):
+            from summarizer.ai_provider import _GeminiClient
+            client = _GeminiClient(api_key="test-key", model="gemini-2.5-flash")
+            result = client.complete(system="You are an analyst.", user="Summarise threats.")
+
+        assert result == "Gemini summary output."
+        mock_genai.configure.assert_called_once_with(api_key="test-key")
+        mock_genai.GenerativeModel.assert_called_once_with(
+            model_name="gemini-2.5-flash",
+            system_instruction="You are an analyst.",
+        )
+
+    def test_gemini_complete_returns_none_on_api_error(self):
+        """_GeminiClient.complete() returns None when the Gemini API raises."""
+        import sys
+        import types
+        from unittest.mock import MagicMock
+
+        mock_genai = MagicMock()
+        mock_genai.GenerativeModel.side_effect = Exception("quota exceeded")
+
+        mock_google = types.ModuleType("google")
+        mock_google.generativeai = mock_genai
+
+        with patch.dict(sys.modules, {"google": mock_google, "google.generativeai": mock_genai}):
+            from summarizer.ai_provider import _GeminiClient
+            client = _GeminiClient(api_key="test-key", model="gemini-2.5-flash")
+            result = client.complete(system="sys", user="user")
+
+        assert result is None
+
+    def test_gemini_complete_scales_max_tokens(self):
+        """_GeminiClient passes scaled max_output_tokens to absorb thinking overhead."""
+        import sys
+        import types
+        from unittest.mock import MagicMock
+
+        captured_configs = []
+
+        mock_response = MagicMock()
+        mock_response.text = "Complete summary sentence."
+
+        mock_model = MagicMock()
+        def capture_generate(user, generation_config=None):
+            captured_configs.append(generation_config)
+            return mock_response
+        mock_model.generate_content.side_effect = capture_generate
+
+        mock_genai = MagicMock()
+        mock_genai.GenerativeModel.return_value = mock_model
+
+        mock_google = types.ModuleType("google")
+        mock_google.generativeai = mock_genai
+
+        with patch.dict(sys.modules, {"google": mock_google, "google.generativeai": mock_genai}):
+            from summarizer.ai_provider import _GeminiClient
+            client = _GeminiClient(api_key="test-key", model="gemini-2.5-flash")
+            client.complete(system="sys", user="user", max_tokens=150)
+
+        assert len(captured_configs) >= 1
+        cfg = captured_configs[0]
+        # Either a dict or a GenerationConfig object — both must have scaled tokens
+        if isinstance(cfg, dict):
+            assert cfg["max_output_tokens"] >= 900  # 150 * 6
+        else:
+            assert cfg.max_output_tokens >= 900
+
+    def test_gemini_complete_falls_back_when_thinking_config_raises(self):
+        """Falls back to standard GenerationConfig when thinking_config is unsupported."""
+        import sys
+        import types
+        from unittest.mock import MagicMock
+
+        mock_response = MagicMock()
+        mock_response.text = "Fallback response completed."
+
+        mock_model = MagicMock()
+        mock_model.generate_content.side_effect = [
+            Exception("Unknown field thinking_config"),
+            mock_response,
+        ]
+
+        mock_genai = MagicMock()
+        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.types.GenerationConfig.return_value = MagicMock()
+
+        mock_google = types.ModuleType("google")
+        mock_google.generativeai = mock_genai
+
+        with patch.dict(sys.modules, {"google": mock_google, "google.generativeai": mock_genai}):
+            from summarizer.ai_provider import _GeminiClient
+            client = _GeminiClient(api_key="test-key", model="gemini-2.5-flash")
+            result = client.complete(system="sys", user="user")
+
+        assert result == "Fallback response completed."
+        assert mock_model.generate_content.call_count == 2
+
+    def test_gemini_complete_returns_none_when_response_text_raises(self):
+        """response.text raising ValueError (safety block) returns None gracefully."""
+        import sys
+        import types
+        from unittest.mock import MagicMock, PropertyMock
+
+        mock_response = MagicMock()
+        type(mock_response).text = PropertyMock(side_effect=ValueError("blocked by safety"))
+
+        mock_model = MagicMock()
+        mock_model.generate_content.return_value = mock_response
+
+        mock_genai = MagicMock()
+        mock_genai.GenerativeModel.return_value = mock_model
+
+        mock_google = types.ModuleType("google")
+        mock_google.generativeai = mock_genai
+
+        with patch.dict(sys.modules, {"google": mock_google, "google.generativeai": mock_genai}):
+            from summarizer.ai_provider import _GeminiClient
+            client = _GeminiClient(api_key="test-key", model="gemini-2.5-flash")
+            result = client.complete(system="sys", user="user")
+
+        assert result is None
+
+    def test_gemini_complete_returns_none_when_response_text_is_none(self):
+        """None response.text (stopped early / MAX_TOKENS) returns None gracefully."""
+        import sys
+        import types
+        from unittest.mock import MagicMock
+
+        mock_response = MagicMock()
+        mock_response.text = None
+
+        mock_model = MagicMock()
+        mock_model.generate_content.return_value = mock_response
+
+        mock_genai = MagicMock()
+        mock_genai.GenerativeModel.return_value = mock_model
+
+        mock_google = types.ModuleType("google")
+        mock_google.generativeai = mock_genai
+
+        with patch.dict(sys.modules, {"google": mock_google, "google.generativeai": mock_genai}):
+            from summarizer.ai_provider import _GeminiClient
+            client = _GeminiClient(api_key="test-key", model="gemini-2.5-flash")
+            result = client.complete(system="sys", user="user")
+
+        assert result is None
 
 
 # ── Extractor ─────────────────────────────────────────────────────────────────
@@ -304,6 +506,135 @@ class TestSummarizer:
         executive, detailed = generate_summaries(report, [], client)
         assert not executive.startswith(" ")
         assert not executive.endswith(" ")
+
+    def test_complete_summary_is_not_retried(self):
+        """A response that ends with a sentence terminator must not trigger a retry."""
+        report = _report()
+        call_count = [0]
+
+        def fake_complete(system, user, max_tokens=400):
+            call_count[0] += 1
+            return "All systems are under active threat from nation-state actors."
+
+        client = _MockClient()
+        client.complete = fake_complete
+        generate_summaries(report, [], client)
+        # 2 calls total (one exec, one detail) — no retries
+        assert call_count[0] == 2
+
+    def test_truncated_response_triggers_retry(self):
+        """A response without a sentence terminator must be retried exactly once."""
+        report = _report()
+        calls = []
+
+        def fake_complete(system, user, max_tokens=400):
+            calls.append(max_tokens)
+            if len(calls) in (1, 3):
+                # First attempt for each summary: truncated
+                return "Our most urgent threat is an"
+            # Retry: complete
+            return "Our most urgent threat is an actively exploited CVE."
+
+        client = _MockClient()
+        client.complete = fake_complete
+        executive, detailed = generate_summaries(report, [], client)
+
+        assert executive.endswith(".")
+        assert detailed.endswith(".")
+        assert len(calls) == 4  # exec: 2 calls, detail: 2 calls
+
+    def test_retry_uses_doubled_token_budget(self):
+        """The retry call must use _RETRY_MULTIPLIER × the original token budget."""
+        from summarizer.summarizer import _EXEC_MAX_TOKENS, _RETRY_MULTIPLIER
+        report = _report()
+        token_budgets = []
+
+        def fake_complete(system, user, max_tokens=400):
+            token_budgets.append(max_tokens)
+            # Always truncated — forces retry
+            return "Truncated without terminator"
+
+        client = _MockClient()
+        client.complete = fake_complete
+        generate_summaries(report, [], client)
+
+        exec_budgets = token_budgets[:2]  # first two calls are for executive summary
+        assert exec_budgets[0] == _EXEC_MAX_TOKENS
+        assert exec_budgets[1] == _EXEC_MAX_TOKENS * _RETRY_MULTIPLIER
+
+    def test_falls_back_to_placeholder_when_both_attempts_too_short(self):
+        """Both attempts < MIN_WORDS_BEFORE_FALLBACK must return empty string (placeholder)."""
+        report = _report()
+
+        client = _MockClient(response="Too short")  # no sentence terminator, < 10 words
+        executive, detailed = generate_summaries(report, [], client)
+
+        assert executive == ""
+        assert detailed == ""
+
+    def test_uses_longer_result_when_both_incomplete_but_long_enough(self):
+        """When both attempts are incomplete but above the minimum, use the longer one."""
+        report = _report()
+        calls = [0]
+
+        def fake_complete(system, user, max_tokens=400):
+            calls[0] += 1
+            if calls[0] % 2 == 1:
+                # First attempt: shorter incomplete
+                return "Threat actors are targeting critical infrastructure and financial"
+            # Retry: longer incomplete but still no terminator
+            return (
+                "Threat actors are targeting critical infrastructure and financial "
+                "institutions with advanced persistent threats and ransomware campaigns"
+            )
+
+        client = _MockClient()
+        client.complete = fake_complete
+        executive, detailed = generate_summaries(report, [], client)
+
+        # Should use the longer retry result, not fall back to placeholder
+        assert "ransomware campaigns" in executive
+        assert "ransomware campaigns" in detailed
+
+
+# ── is_complete helper ────────────────────────────────────────────────────────
+
+class TestIsComplete:
+    def test_period_is_complete(self):
+        from summarizer.summarizer import _is_complete
+        assert _is_complete("Patch immediately.") is True
+
+    def test_exclamation_is_complete(self):
+        from summarizer.summarizer import _is_complete
+        assert _is_complete("Critical alert!") is True
+
+    def test_question_mark_is_complete(self):
+        from summarizer.summarizer import _is_complete
+        assert _is_complete("Is your system patched?") is True
+
+    def test_trailing_whitespace_ignored(self):
+        from summarizer.summarizer import _is_complete
+        assert _is_complete("Patch now.   ") is True
+
+    def test_truncated_mid_word_is_incomplete(self):
+        from summarizer.summarizer import _is_complete
+        assert _is_complete("Our most urgent threat is an") is False
+
+    def test_truncated_mid_cve_is_incomplete(self):
+        from summarizer.summarizer import _is_complete
+        assert _is_complete("Critical vulnerability CVE-") is False
+
+    def test_empty_string_is_incomplete(self):
+        from summarizer.summarizer import _is_complete
+        assert _is_complete("") is False
+
+    def test_sentence_with_closing_quote_is_complete(self):
+        from summarizer.summarizer import _is_complete
+        assert _is_complete('The threat is "critical."') is True
+
+    def test_sentence_ending_in_parenthetical_cve_is_complete(self):
+        from summarizer.summarizer import _is_complete
+        assert _is_complete("Patch the affected system (CVE-2026-1234).") is True
 
 
 # ── Prompt builder ────────────────────────────────────────────────────────────
