@@ -10,10 +10,15 @@ class AuditAction(str, Enum):
     ITEM_DEDUPLICATED = "item_deduplicated"
     REPORT_GENERATED = "report_generated"
     EMAIL_SENT = "email_sent"
+    EMAIL_SKIPPED_NO_CREDENTIALS = "email_skipped_no_credentials"
     APPROVAL_RECEIVED = "approval_received"
     APPROVAL_REJECTED = "approval_rejected"
+    APPROVAL_EDITED = "approval_edited"
+    APPROVAL_TIMEOUT = "approval_timeout"
+    APPROVAL_POLL_CHECKED = "approval_poll_checked"
     LINKEDIN_PUBLISHED = "linkedin_published"
     LINKEDIN_SKIPPED_TEST_MODE = "linkedin_skipped_test_mode"
+    CONTENT_SAVED_TEST_MODE = "content_saved_test_mode"
     ERROR = "error"
 
 

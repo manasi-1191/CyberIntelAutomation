@@ -36,6 +36,11 @@ class DailyReport(BaseModel):
     executive_summary: str = ""    # <50 words
     detailed_summary: str = ""     # ~100 words
 
+    # Email workflow (Phase 2)
+    email_sent_at: Optional[datetime] = None
+    gmail_thread_id: str = ""
+    gmail_message_id: str = ""
+
     # Workflow state
     approval_status: ApprovalStatus = ApprovalStatus.PENDING
     approval_received_at: Optional[datetime] = None
@@ -43,7 +48,7 @@ class DailyReport(BaseModel):
     published_at: Optional[datetime] = None
     published_content: str = ""    # Final content used (may be edited)
 
-    # In TEST_MODE this path holds the simulated LinkedIn post
+    # In TEST_MODE this path holds the approved content instead of publishing to LinkedIn
     test_output_path: str = ""
 
     model_config = ConfigDict(use_enum_values=True)
