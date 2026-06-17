@@ -1,39 +1,25 @@
 """
-Deduplication via stable content hashes.
-For vulnerabilities: keyed on CVE ID.
-For threat events: keyed on (source_url or title) normalized.
-Seen hashes are persisted across runs in a JSON sidecar file.
+In-run deduplication only — no cross-run persistence.
+
+Design rationale: the 48-hour collection window already defines freshness.
+Persisting hashes across runs caused every item to be suppressed on the
+second run, even though it was still legitimately within the window.
+
+Vulns are keyed by normalized CVE ID (separate set from events).
+Events are keyed by SHA-1 of source_url-or-title (separate set from vulns).
+Using separate sets prevents theoretical cross-type hash collisions.
 """
 import hashlib
-import json
 import logging
-from pathlib import Path
 
 from models.vulnerability import Vulnerability
 from models.threat import ThreatEvent
 
 logger = logging.getLogger(__name__)
 
-_SEEN_FILE = Path("data/raw/seen_hashes.json")
-
-
-def _load_seen() -> set[str]:
-    if _SEEN_FILE.exists():
-        try:
-            return set(json.loads(_SEEN_FILE.read_text()))
-        except Exception:
-            return set()
-    return set()
-
-
-def _save_seen(seen: set[str]) -> None:
-    _SEEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _SEEN_FILE.write_text(json.dumps(sorted(seen), indent=2))
-
 
 def _vuln_key(v: Vulnerability) -> str:
-    raw = v.cve_id.upper().strip()
-    return hashlib.sha1(raw.encode()).hexdigest()
+    return v.cve_id.upper().strip()
 
 
 def _event_key(e: ThreatEvent) -> str:
@@ -46,35 +32,36 @@ def deduplicate(
     events: list[ThreatEvent],
 ) -> tuple[list[Vulnerability], list[ThreatEvent], int]:
     """
+    Remove items that appear more than once within this run.
     Returns (unique_vulns, unique_events, duplicate_count).
-    Stamps dedup_hash on each record and persists seen hashes.
+    Stamps dedup_hash on each record.
     """
-    seen = _load_seen()
+    seen_vulns: set[str] = set()
+    seen_events: set[str] = set()
     unique_vulns: list[Vulnerability] = []
     unique_events: list[ThreatEvent] = []
     dupes = 0
 
     for v in vulns:
-        h = _vuln_key(v)
-        v.dedup_hash = h
-        if h in seen:
+        key = _vuln_key(v)
+        v.dedup_hash = hashlib.sha1(key.encode()).hexdigest()
+        if key in seen_vulns:
             dupes += 1
             continue
-        seen.add(h)
+        seen_vulns.add(key)
         unique_vulns.append(v)
 
     for e in events:
-        h = _event_key(e)
-        e.dedup_hash = h
-        if h in seen:
+        key = _event_key(e)
+        e.dedup_hash = key
+        if key in seen_events:
             dupes += 1
             continue
-        seen.add(h)
+        seen_events.add(key)
         unique_events.append(e)
 
-    _save_seen(seen)
     logger.info(
-        "Deduplication: %d unique vulns, %d unique events, %d duplicates removed",
+        "Deduplication: %d unique vulns, %d unique events, %d within-run duplicates removed",
         len(unique_vulns),
         len(unique_events),
         dupes,

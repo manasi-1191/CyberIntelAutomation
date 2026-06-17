@@ -27,6 +27,8 @@ from collectors.rss_feeds import RssFeedCollector
 from pipeline.normalizer import normalize_vulnerabilities, normalize_events
 from pipeline.filter import filter_vulnerabilities, filter_events
 from pipeline.deduplicator import deduplicate
+from pipeline.enricher import enrich_with_kev
+from pipeline.prioritizer import assign_priority_tiers, severity_counts
 from pipeline.report_builder import build_report
 
 from storage.local_store import save_raw_collection, save_report, load_report, list_reports
@@ -101,12 +103,24 @@ def cmd_collect(args: argparse.Namespace) -> None:
     all_events = filter_events(all_events, window_start, window_end)
     logger.info("After filter: %d vulns, %d events", len(all_vulns), len(all_events))
 
-    # 4. Deduplicate
+    # 4. Deduplicate (within-run only)
     unique_vulns, unique_events, dupe_count = deduplicate(all_vulns, all_events)
     log_action(AuditAction.ITEM_DEDUPLICATED, report_id=report_id,
-               detail=f"{dupe_count} duplicates removed")
+               detail=f"{dupe_count} within-run duplicates removed")
 
-    # 5. Build report
+    # 5. Enrich — mark KEV flag on any CVE that appears in the KEV catalog
+    unique_vulns = enrich_with_kev(unique_vulns)
+
+    # 6. Prioritize — assign tiers and sort
+    unique_vulns = assign_priority_tiers(unique_vulns)
+    sc = severity_counts(unique_vulns)
+    logger.info(
+        "Priority tiers: KEV=%d  CRITICAL(CVSS≥9)=%d  CRITICAL=%d  HIGH=%d  MEDIUM=%d  LOW/UNK=%d",
+        sc["kev"], sc["critical_high_cvss"], sc["critical"],
+        sc["high"], sc["medium"], sc["low_unknown"],
+    )
+
+    # 7. Build report
     report = build_report(
         report_id=report_id,
         window_start=window_start,
@@ -116,7 +130,7 @@ def cmd_collect(args: argparse.Namespace) -> None:
         collection_window_hours=settings.collection_window_hours,
     )
 
-    # 6. Persist
+    # 8. Persist
     if not dry_run:
         save_raw_collection(report_id, unique_vulns, unique_events)
         report_path = save_report(report)

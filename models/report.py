@@ -32,6 +32,9 @@ class DailyReport(BaseModel):
     breach_count: int = 0
     attack_count: int = 0
 
+    # Prioritized subset for emails and human review (ranked by priority_tier)
+    featured_vulnerabilities: list[Vulnerability] = Field(default_factory=list)
+
     # Summaries — populated by summarizer (Phase 4)
     executive_summary: str = ""    # <50 words
     detailed_summary: str = ""     # ~100 words

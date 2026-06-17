@@ -1,5 +1,9 @@
 """
 Collector tests use respx to mock HTTP without hitting live APIs.
+
+Note: CisaKevCollector uses a module-level catalog cache (one HTTP call per
+process). Each test that exercises different catalog content must reset it
+via _reset_catalog_cache() so the mock is actually invoked.
 """
 from datetime import datetime, timedelta
 
@@ -7,12 +11,20 @@ import pytest
 import respx
 import httpx
 
-from collectors.cisa_kev import CisaKevCollector
+from collectors.cisa_kev import CisaKevCollector, _reset_catalog_cache
 from collectors.rss_feeds import RssFeedCollector, FEEDS
 
 NOW = datetime(2026, 6, 17, 12, 0, 0)
 WIN_START = NOW - timedelta(hours=48)
 WIN_END = NOW
+
+
+@pytest.fixture(autouse=True)
+def reset_kev_cache():
+    """Reset the KEV catalog cache before every test in this module."""
+    _reset_catalog_cache()
+    yield
+    _reset_catalog_cache()
 
 
 def _kev_payload(date_added: str) -> dict:

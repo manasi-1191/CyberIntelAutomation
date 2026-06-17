@@ -70,16 +70,15 @@ def _build_plain(report: DailyReport, date_label: str) -> str:
 
 
 def _top_cves_plain(report: DailyReport) -> str:
-    from models.vulnerability import Severity
-    critical = [v for v in report.vulnerabilities if v.severity == Severity.CRITICAL]
-    top = sorted(critical, key=lambda v: v.cvss.base_score if v.cvss else 0, reverse=True)[:5]
+    top = (report.featured_vulnerabilities or [])[:10]
     if not top:
-        return "  No critical CVEs in this window."
+        return "  No prioritized CVEs in this window."
     rows = []
     for v in top:
         score = f"CVSS {v.cvss.base_score:.1f}" if v.cvss else "Score N/A"
         kev = " [ACTIVELY EXPLOITED]" if v.is_known_exploited else ""
-        rows.append(f"  • {v.cve_id} ({score}){kev}")
+        tier_label = f" [T{v.priority_tier}]" if v.priority_tier < 99 else ""
+        rows.append(f"  • {v.cve_id} ({score}){kev}{tier_label}")
         if v.description:
             rows.append(f"    {_wrap(v.description[:120], width=76, indent='    ')}")
     return "\n".join(rows)
@@ -190,12 +189,10 @@ def _build_html(report: DailyReport, date_label: str) -> str:
 
 
 def _top_cves_html(report: DailyReport) -> str:
-    from models.vulnerability import Severity
-    critical = [v for v in report.vulnerabilities if v.severity == Severity.CRITICAL]
-    top = sorted(critical, key=lambda v: v.cvss.base_score if v.cvss else 0, reverse=True)[:5]
+    top = (report.featured_vulnerabilities or [])[:10]
 
     if not top:
-        return '<p style="color:#888;font-size:13px;">No critical CVEs in this window.</p>'
+        return '<p style="color:#888;font-size:13px;">No prioritized CVEs in this window.</p>'
 
     rows = ""
     for v in top:

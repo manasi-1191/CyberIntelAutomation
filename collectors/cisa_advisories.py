@@ -1,7 +1,18 @@
 """
 CISA Advisories RSS feed collector.
 https://www.cisa.gov/cybersecurity-advisories/all.xml
+
+Routing logic:
+  - Entry title contains a real CVE ID     → Vulnerability
+  - Entry title references ICS/Industrial  → ThreatEvent (ICS category)
+  - Everything else without a real CVE ID  → ThreatEvent (advisory category)
+
+Previously, entries without a CVE ID were given a fabricated CISA-{hash}
+identifier and stored as Vulnerability objects, polluting the CVE list with
+non-CVE records. This version routes them correctly.
 """
+import re
+import hashlib
 from datetime import datetime
 
 import feedparser
@@ -12,6 +23,7 @@ from models.threat import ThreatEvent, ThreatCategory
 from collectors.base import BaseCollector
 
 _ADVISORIES_RSS = "https://www.cisa.gov/cybersecurity-advisories/all.xml"
+_CVE_RE = re.compile(r"CVE-\d{4}-\d+", re.IGNORECASE)
 
 
 class CisaAdvisoriesCollector(BaseCollector):
@@ -30,7 +42,7 @@ class CisaAdvisoriesCollector(BaseCollector):
         events: list[ThreatEvent] = []
 
         for entry in feed.entries:
-            published = self._parse_feed_date(entry.get("published", ""))
+            published = _parse_date(entry.get("published", ""))
             if not self.within_window(published):
                 continue
 
@@ -38,30 +50,30 @@ class CisaAdvisoriesCollector(BaseCollector):
             link: str = entry.get("link", "")
             summary: str = entry.get("summary", "")
             tags: list[str] = [t.get("term", "") for t in entry.get("tags", [])]
+            cve_id = _extract_cve(title)
 
-            # Advisories that reference CVEs become Vulnerability objects;
-            # others become ThreatEvent objects (APT, ICS, etc.)
-            if "ICS" in title or "Industrial" in title:
-                event = ThreatEvent(
-                    event_id=self._make_id(link or title),
+            if cve_id:
+                # Real CVE reference → Vulnerability
+                vulns.append(Vulnerability(
+                    cve_id=cve_id,
+                    source=self.name,
+                    source_url=link,
+                    description=summary,
+                    published_at=published,
+                ))
+            else:
+                # No CVE ID — route to ThreatEvent regardless of ICS/non-ICS
+                is_ics = "ICS" in title or "Industrial" in title or "SCADA" in title
+                events.append(ThreatEvent(
+                    event_id=_make_id(link or title),
                     source=self.name,
                     source_url=link,
                     title=title,
                     category=ThreatCategory.OTHER,
                     description=summary,
-                    tags=tags,
+                    tags=tags + (["ics"] if is_ics else []),
                     published_at=published,
-                )
-                events.append(event)
-            else:
-                vuln = Vulnerability(
-                    cve_id=self._extract_cve(title) or f"CISA-{self._make_id(title)[:8]}",
-                    source=self.name,
-                    source_url=link,
-                    description=summary,
-                    published_at=published,
-                )
-                vulns.append(vuln)
+                ))
 
         self.logger.info(
             "CISA advisories: %d vulns, %d events within window",
@@ -70,22 +82,20 @@ class CisaAdvisoriesCollector(BaseCollector):
         )
         return vulns, events
 
-    @staticmethod
-    def _parse_feed_date(value: str) -> datetime | None:
-        if not value:
-            return None
-        try:
-            return dateutil_parser.parse(value).replace(tzinfo=None)
-        except Exception:
-            return None
 
-    @staticmethod
-    def _extract_cve(text: str) -> str:
-        import re
-        match = re.search(r"CVE-\d{4}-\d+", text, re.IGNORECASE)
-        return match.group(0).upper() if match else ""
+def _parse_date(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return dateutil_parser.parse(value).replace(tzinfo=None)
+    except Exception:
+        return None
 
-    @staticmethod
-    def _make_id(text: str) -> str:
-        import hashlib
-        return hashlib.sha1(text.encode()).hexdigest()
+
+def _extract_cve(text: str) -> str:
+    match = _CVE_RE.search(text)
+    return match.group(0).upper() if match else ""
+
+
+def _make_id(text: str) -> str:
+    return hashlib.sha1(text.encode()).hexdigest()

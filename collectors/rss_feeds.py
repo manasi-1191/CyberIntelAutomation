@@ -1,7 +1,16 @@
 """
 Generic RSS/Atom feed collector for cybersecurity news sources.
-Add or remove feeds from the FEEDS list without touching any other code.
+Add or remove feeds from FEEDS without touching any other code.
+
+Feed status as of 2026-06-17:
+  thehackernews    — active, ~19 articles/48h
+  bleepingcomputer — active, ~15 articles/48h (feed capped at 15)
+  krebsonsecurity  — active, low frequency (~0-2 articles/48h)
+  sans_isc         — active, daily posts (replaced dead Threatpost feed)
+  darkreading      — active, ~8 articles/48h
+  threatpost       — REMOVED: feed dead since Aug 2022, no new content
 """
+import hashlib
 from datetime import datetime
 from typing import NamedTuple
 
@@ -35,8 +44,8 @@ FEEDS: list[FeedConfig] = [
         category=ThreatCategory.OTHER,
     ),
     FeedConfig(
-        url="https://threatpost.com/feed/",
-        name="threatpost",
+        url="https://isc.sans.edu/rssfeed_full.xml",
+        name="sans_isc",
         category=ThreatCategory.OTHER,
     ),
     FeedConfig(
@@ -56,12 +65,18 @@ class RssFeedCollector(BaseCollector):
 
     def collect(self) -> tuple[list, list[ThreatEvent]]:
         events: list[ThreatEvent] = []
+        per_feed: dict[str, int] = {}
 
         for feed_cfg in FEEDS:
             feed_events = self._collect_feed(feed_cfg)
+            per_feed[feed_cfg.name] = len(feed_events)
             events.extend(feed_events)
 
-        self.logger.info("RSS feeds: %d events within window", len(events))
+        self.logger.info(
+            "RSS feeds: %d events within window %s",
+            len(events),
+            {k: v for k, v in per_feed.items() if v > 0},
+        )
         return [], events
 
     def _collect_feed(self, cfg: FeedConfig) -> list[ThreatEvent]:
@@ -75,7 +90,7 @@ class RssFeedCollector(BaseCollector):
 
         events: list[ThreatEvent] = []
         for entry in feed.entries:
-            published = self._parse_date(entry.get("published", "") or entry.get("updated", ""))
+            published = _parse_date(entry.get("published", "") or entry.get("updated", ""))
             if not self.within_window(published):
                 continue
 
@@ -87,7 +102,7 @@ class RssFeedCollector(BaseCollector):
             category = _classify(text, cfg.category)
             cve_refs = _extract_cves(title + " " + summary)
 
-            event = ThreatEvent(
+            events.append(ThreatEvent(
                 event_id=_make_id(link or title, published),
                 source=cfg.name,
                 source_url=link,
@@ -96,19 +111,18 @@ class RssFeedCollector(BaseCollector):
                 description=summary,
                 cve_references=cve_refs,
                 published_at=published,
-            )
-            events.append(event)
+            ))
 
         return events
 
-    @staticmethod
-    def _parse_date(value: str) -> datetime | None:
-        if not value:
-            return None
-        try:
-            return dateutil_parser.parse(value).replace(tzinfo=None)
-        except Exception:
-            return None
+
+def _parse_date(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return dateutil_parser.parse(value).replace(tzinfo=None)
+    except Exception:
+        return None
 
 
 def _classify(text: str, default: ThreatCategory) -> ThreatCategory:
@@ -129,6 +143,5 @@ def _extract_cves(text: str) -> list[str]:
 
 
 def _make_id(text: str, dt: datetime | None) -> str:
-    import hashlib
     stamp = dt.isoformat() if dt else ""
     return hashlib.sha1(f"{text}{stamp}".encode()).hexdigest()
