@@ -21,14 +21,17 @@ class Settings(BaseSettings):
     approval_email_recipient: str = Field(default="")
     approval_email_sender: str = Field(default="")
 
-    # LinkedIn — Phase 3
+    # AI — Phase 3
+    ai_provider: str = Field(default="none")   # "xai", "anthropic", or "none"
+    xai_api_key: str = Field(default="")
+    anthropic_api_key: str = Field(default="")
+    ai_model: str = Field(default="")          # overrides provider default when set
+
+    # LinkedIn — future phase
     linkedin_client_id: str = Field(default="")
     linkedin_client_secret: str = Field(default="")
     linkedin_access_token: str = Field(default="")
     linkedin_author_urn: str = Field(default="")
-
-    # Anthropic — Phase 4
-    anthropic_api_key: str = Field(default="")
 
     # NVD
     nvd_api_key: str = Field(default="")

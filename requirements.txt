@@ -20,6 +20,10 @@ google-auth>=2.29.0
 google-auth-httplib2>=0.2.0
 google-auth-oauthlib>=1.2.0
 
+# AI providers (Phase 3)
+openai>=1.0.0       # used for xAI/Grok (OpenAI-compatible API)
+anthropic>=0.28.0   # used for Claude
+
 # Testing
 pytest>=8.2.0
 pytest-asyncio>=0.23.0

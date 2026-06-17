@@ -35,9 +35,11 @@ class DailyReport(BaseModel):
     # Prioritized subset for emails and human review (ranked by priority_tier)
     featured_vulnerabilities: list[Vulnerability] = Field(default_factory=list)
 
-    # Summaries — populated by summarizer (Phase 4)
-    executive_summary: str = ""    # <50 words
-    detailed_summary: str = ""     # ~100 words
+    # AI extraction + summaries (Phase 3)
+    executive_summary: str = ""          # <50 words, AI-generated
+    detailed_summary: str = ""           # ~100 words, AI-generated
+    extracted_events_path: str = ""      # path to _extracted_events.json
+    summaries_path: str = ""             # path to _summaries.txt
 
     # Email workflow (Phase 2)
     email_sent_at: Optional[datetime] = None

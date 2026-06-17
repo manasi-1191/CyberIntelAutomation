@@ -15,6 +15,7 @@ from config.settings import settings
 from models.vulnerability import Vulnerability
 from models.threat import ThreatEvent
 from models.report import DailyReport
+from models.extracted_event import ExtractedThreatEvent
 
 logger = logging.getLogger(__name__)
 
@@ -65,3 +66,30 @@ def list_reports() -> list[str]:
     """Returns report IDs sorted newest first."""
     paths = sorted(settings.reports_dir.glob("*_report.json"), reverse=True)
     return [p.stem.replace("_report", "") for p in paths]
+
+
+def save_extracted_events(
+    report_id: str,
+    extracted: list[ExtractedThreatEvent],
+) -> Path:
+    path = settings.reports_dir / f"{report_id}_extracted_events.json"
+    _write(path, [e.model_dump() for e in extracted])
+    logger.info("Saved extracted events: %s", path)
+    return path
+
+
+def save_summaries_text(report_id: str, executive: str, detailed: str) -> Path:
+    path = settings.reports_dir / f"{report_id}_summaries.txt"
+    exec_words = len(executive.split())
+    detail_words = len(detailed.split())
+    content = (
+        f"EXECUTIVE SUMMARY ({exec_words} words)\n"
+        f"{'=' * 60}\n"
+        f"{executive}\n\n"
+        f"DETAILED SUMMARY ({detail_words} words)\n"
+        f"{'=' * 60}\n"
+        f"{detailed}\n"
+    )
+    path.write_text(content, encoding="utf-8")
+    logger.info("Saved summaries text: %s", path)
+    return path

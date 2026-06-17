@@ -2,10 +2,11 @@
 CyberIntel Automation — main entry point.
 
 Commands:
-  python main.py collect                              # collect data, build report, auto-send email
+  python main.py collect                              # collect data, build report, run AI, auto-send email
   python main.py collect --date 2026-06-16           # backfill a specific date
   python main.py collect --dry-run                    # collect only, no writes, no email
   python main.py collect --no-email                  # collect and save, skip email
+  python main.py summarize --report-id 2026-06-17   # run AI extraction+summarization on a saved report
   python main.py send-email --report-id 2026-06-17   # (re)send approval email for a saved report
   python main.py check-approval                      # poll Gmail for replies on all pending reports
   python main.py check-approval --report-id 2026-06-17  # check one specific report
@@ -31,7 +32,10 @@ from pipeline.enricher import enrich_with_kev
 from pipeline.prioritizer import assign_priority_tiers, severity_counts
 from pipeline.report_builder import build_report
 
-from storage.local_store import save_raw_collection, save_report, load_report, list_reports
+from storage.local_store import (
+    save_raw_collection, save_report, load_report, list_reports,
+    save_extracted_events, save_summaries_text,
+)
 from storage.audit_logger import log_action
 from models.audit import AuditAction
 from models.report import DailyReport, ApprovalStatus
@@ -139,6 +143,10 @@ def cmd_collect(args: argparse.Namespace) -> None:
     else:
         logger.info("DRY RUN — skipping storage writes")
 
+    # 9. AI extraction + summarization
+    if not dry_run:
+        _run_ai_pipeline(report)
+
     log_action(AuditAction.COLLECTION_COMPLETED, report_id=report_id)
 
     logger.info(
@@ -147,9 +155,76 @@ def cmd_collect(args: argparse.Namespace) -> None:
         len(unique_events), report.breach_count, report.attack_count,
     )
 
-    # 7. Send approval email (unless skipped)
+    # 10. Send approval email (unless skipped)
     if not dry_run and not skip_email:
         _send_email_for_report(report)
+
+
+# ── AI pipeline ──────────────────────────────────────────────────────────────
+
+def _run_ai_pipeline(report: DailyReport) -> None:
+    """Phase 3: extract threat intelligence from events, then generate summaries."""
+    from summarizer.ai_provider import get_ai_client
+    from summarizer.extractor import extract_threat_events
+    from summarizer.summarizer import generate_summaries
+
+    client = get_ai_client()
+    if client is None:
+        logger.info(
+            "AI disabled (AI_PROVIDER=%s) — extraction and summarization skipped",
+            settings.ai_provider,
+        )
+        log_action(
+            AuditAction.AI_SKIPPED_NO_KEY,
+            report_id=report.report_id,
+            detail=f"AI_PROVIDER={settings.ai_provider}",
+        )
+        return
+
+    logger.info("AI pipeline starting (provider=%s, model=%s)", settings.ai_provider, client.model)
+
+    # Phase 3A — extract structured intelligence from threat events
+    extracted = extract_threat_events(report.threat_events, client)
+    if extracted:
+        path = save_extracted_events(report.report_id, extracted)
+        report.extracted_events_path = str(path)
+        log_action(
+            AuditAction.AI_EXTRACTION_COMPLETED,
+            report_id=report.report_id,
+            detail=f"{len(extracted)} events extracted using {client.model}",
+        )
+
+    # Phase 3B — generate executive and detailed summaries
+    executive, detailed = generate_summaries(report, extracted, client)
+    if executive or detailed:
+        report.executive_summary = executive
+        report.detailed_summary = detailed
+        summaries_path = save_summaries_text(report.report_id, executive, detailed)
+        report.summaries_path = str(summaries_path)
+        log_action(
+            AuditAction.AI_SUMMARY_GENERATED,
+            report_id=report.report_id,
+            detail=(
+                f"exec={len(executive.split())}w, "
+                f"detail={len(detailed.split())}w, "
+                f"model={client.model}"
+            ),
+        )
+        logger.info("Summaries saved: %s", summaries_path)
+
+    save_report(report)
+
+
+# ── Summarize subcommand ──────────────────────────────────────────────────────
+
+def cmd_summarize(args: argparse.Namespace) -> None:
+    """Re-run AI extraction and summarization on a previously collected report."""
+    settings.ensure_dirs()
+    report = load_report(args.report_id)
+    if not report:
+        logger.error("Report not found: %s", args.report_id)
+        sys.exit(1)
+    _run_ai_pipeline(report)
 
 
 # ── Send email ────────────────────────────────────────────────────────────────
@@ -348,6 +423,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_collect.add_argument("--no-email", action="store_true",
                            help="Save report but skip sending email")
 
+    # summarize
+    p_sum = sub.add_parser("summarize", help="Run AI extraction + summarization on a saved report")
+    p_sum.add_argument("--report-id", required=True, metavar="YYYY-MM-DD",
+                       help="Report ID to summarize")
+
     # send-email
     p_send = sub.add_parser("send-email", help="Send approval email for a saved report")
     p_send.add_argument("--report-id", required=True, metavar="YYYY-MM-DD",
@@ -367,6 +447,7 @@ if __name__ == "__main__":
 
     dispatch = {
         "collect": cmd_collect,
+        "summarize": cmd_summarize,
         "send-email": cmd_send_email,
         "check-approval": cmd_check_approval,
     }
