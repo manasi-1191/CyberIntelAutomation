@@ -53,6 +53,10 @@ class DailyReport(BaseModel):
     published_at: Optional[datetime] = None
     published_content: str = ""    # Final content used (may be edited)
 
+    # LinkedIn publish result (Phase 4)
+    linkedin_post_id: str = ""
+    linkedin_published_at: Optional[datetime] = None
+
     # In TEST_MODE this path holds the approved content instead of publishing to LinkedIn
     test_output_path: str = ""
 

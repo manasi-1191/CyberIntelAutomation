@@ -20,6 +20,7 @@ class AuditAction(str, Enum):
     AI_SUMMARY_GENERATED = "ai_summary_generated"
     AI_SKIPPED_NO_KEY = "ai_skipped_no_key"
     LINKEDIN_PUBLISHED = "linkedin_published"
+    LINKEDIN_PUBLISH_FAILED = "linkedin_publish_failed"
     LINKEDIN_SKIPPED_TEST_MODE = "linkedin_skipped_test_mode"
     CONTENT_SAVED_TEST_MODE = "content_saved_test_mode"
     ERROR = "error"

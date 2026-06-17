@@ -388,16 +388,71 @@ def _publish_or_simulate(report: DailyReport) -> None:
             output_path,
         )
     else:
-        # Phase 3 will replace this
-        logger.info(
-            "LinkedIn publishing not yet implemented (Phase 3). "
-            "Content ready in report.published_content."
+        _publish_to_linkedin(report)
+
+
+def _publish_to_linkedin(report: DailyReport) -> None:
+    """Publish approved content to LinkedIn. Falls back to manual file on any failure."""
+    from linkedin.auth import is_configured as linkedin_is_configured
+    from linkedin.publisher import publish_post
+
+    if not linkedin_is_configured():
+        logger.warning(
+            "LinkedIn credentials not configured — saving content for manual posting. "
+            "Run: python scripts/linkedin_setup.py"
         )
-        log_action(
-            AuditAction.LINKEDIN_SKIPPED_TEST_MODE,
+        _save_for_manual_posting(report)
+        return
+
+    try:
+        post_id = publish_post(
+            content=report.published_content,
+            author_urn=settings.linkedin_author_urn,
             report_id=report.report_id,
-            detail="Phase 3 not implemented",
         )
+    except ValueError as exc:
+        logger.error("LinkedIn publish validation error: %s", exc)
+        _save_for_manual_posting(report)
+        return
+    except Exception as exc:
+        logger.error("LinkedIn publish unexpected error: %s", exc)
+        _save_for_manual_posting(report)
+        return
+
+    if post_id:
+        report.linkedin_post_id = post_id
+        report.linkedin_published_at = datetime.utcnow()
+        save_report(report)
+        log_action(
+            AuditAction.LINKEDIN_PUBLISHED,
+            report_id=report.report_id,
+            detail=f"post_id={post_id} author={settings.linkedin_author_urn}",
+        )
+        logger.info("Published to LinkedIn: %s", post_id)
+    else:
+        _save_for_manual_posting(report)
+
+
+def _save_for_manual_posting(report: DailyReport) -> None:
+    """LinkedIn publish failed or not configured — save content for manual copy-paste."""
+    output_path = settings.reports_dir / f"{report.report_id}_linkedin_manual.txt"
+    instructions = (
+        f"LinkedIn post for {report.report_id}\n"
+        f"{'=' * 60}\n\n"
+        f"{report.published_content}\n\n"
+        f"{'=' * 60}\n"
+        "Copy the text above and post it manually at:\n"
+        "https://www.linkedin.com/feed/\n"
+    )
+    output_path.write_text(instructions, encoding="utf-8")
+    report.test_output_path = str(output_path)
+    save_report(report)
+    log_action(
+        AuditAction.LINKEDIN_PUBLISH_FAILED,
+        report_id=report.report_id,
+        detail=f"manual fallback saved to {output_path}",
+    )
+    logger.warning("Content saved for manual LinkedIn posting: %s", output_path)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

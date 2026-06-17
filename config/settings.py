@@ -28,10 +28,11 @@ class Settings(BaseSettings):
     gemini_api_key: str = Field(default="")
     ai_model: str = Field(default="")          # overrides provider default when set
 
-    # LinkedIn — future phase
+    # LinkedIn — Phase 4
     linkedin_client_id: str = Field(default="")
     linkedin_client_secret: str = Field(default="")
     linkedin_access_token: str = Field(default="")
+    linkedin_refresh_token: str = Field(default="")
     linkedin_author_urn: str = Field(default="")
 
     # NVD
