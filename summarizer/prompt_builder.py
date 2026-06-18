@@ -149,67 +149,38 @@ def build_linkedin_preview_prompt(
     vuln_ctx = _vuln_context(report)
     event_ctx = _event_context(extracted)
 
-    has_vulns = bool(report.featured_vulnerabilities)
-    has_events = bool(extracted)
-    has_breaches = report.breach_count > 0
-    has_attacks = report.attack_count > 0
+    return f"""Write a LinkedIn post for a cybersecurity professional audience covering the last 48 hours of threat activity ({report.report_id}).
 
-    # Build a focused instruction based on what data is actually available
-    coverage_notes = []
-    if has_vulns:
-        coverage_notes.append(
-            f"- {report.critical_cve_count} critical CVE(s), {report.kev_count} actively exploited "
-            "(in CISA KEV) — include CVE IDs where relevant"
-        )
-    if has_attacks:
-        coverage_notes.append(f"- {report.attack_count} cyber attack(s) detected")
-    if has_breaches:
-        coverage_notes.append(f"- {report.breach_count} data breach(es) detected")
-    if not coverage_notes:
-        coverage_notes.append("- Limited intelligence available for this period")
+AUDIENCE: Security leaders, CISOs, IT directors, security engineers.
 
-    coverage_block = "\n".join(coverage_notes)
+TONE: Professional analyst, not a report author. Informative and direct. No jargon where plain language works.
 
-    return f"""Write a LinkedIn threat intelligence post for the 48-hour period ending {report.report_id}.
+LENGTH: 120–200 words. Hard maximum 220 words. Count carefully and cut if over.
 
-AUDIENCE: CISOs, security leaders, IT directors, security engineers, enterprise decision-makers.
+FORMAT: Plain text only. No markdown. No bold. No headers. No nested bullets.
 
-TONE: Professional, concise, factual. No marketing language. No sensationalism. No generic filler.
-Every bullet must be grounded in the intelligence below — omit any section where data is unavailable.
+STRUCTURE — follow this exactly, in this order:
 
-LENGTH: 150–300 words (count carefully).
+1. One line: a hook or headline capturing the most significant development. One emoji at most, at the start. Keep it under 15 words.
 
-REQUIRED STRUCTURE (use this exact format):
+2. One short paragraph (2–3 sentences): summarise the most important developments. Do not repeat the hook. Focus on what matters most.
 
-[One-line hook — start with a single relevant emoji, followed by a concise headline of the most significant development]
+3. Three to five bullets using a plain dash (-). Each bullet is one concise sentence. Cover only the highest-priority items: actively exploited vulnerabilities, major attacks or breaches, notable threat actors. Skip a category entirely if there is nothing significant to say. Do not label the bullets with category names.
 
-[2–3 sentence overview of the most important threat developments this period]
+4. One short paragraph (1–2 sentences): a practical enterprise takeaway — what organisations should do or watch.
 
-Key developments — last 48 hours:
+5. Three to five hashtags on a single line.
 
-• [Vulnerability highlights — include CVE IDs, severity, exploitation status]
-• [Attack highlights — include threat actor, attack type, targeted sector]
-• [Breach highlights — include organizations, data type, scale if known]
-• [Threat actor highlights — attribution, motivation, TTPs if known]
-
-(Omit any bullet category if no relevant intelligence is available.)
-
-Enterprise considerations:
-
-• [Key lesson or defensive takeaway]
-• [Recommended action or control]
-• [Security theme or pattern observed]
-
-(Omit any bullet if not supported by the intelligence.)
-
-[3–5 relevant hashtags — choose from: #CyberSecurity #ThreatIntelligence #InfoSec #CyberDefense #VulnerabilityManagement #DataBreach #Ransomware #ZeroDay #APT #CISO]
+RULES:
+- Base every statement on the intelligence below. Do not invent facts.
+- Mention CVE IDs only for actively exploited or critical vulnerabilities.
+- Name threat actors only when attribution is confirmed or well-reported.
+- Prefer the two or three most important items over exhaustive coverage.
+- Do not repeat the same information across sections.
 
 INTELLIGENCE:
 {vuln_ctx}
 
 {event_ctx}
 
-COVERAGE AVAILABLE:
-{coverage_block}
-
-Output ONLY the LinkedIn post text — no heading, no label, no explanation, no quotation marks."""
+Output ONLY the post text. No heading, no label, no explanation."""

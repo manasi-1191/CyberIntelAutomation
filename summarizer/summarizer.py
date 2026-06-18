@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 _EXEC_MAX_TOKENS = 150
 _DETAIL_MAX_TOKENS = 400
-_LINKEDIN_MAX_TOKENS = 700
+_LINKEDIN_MAX_TOKENS = 450
 _RETRY_MULTIPLIER = 2
 _MIN_WORDS_BEFORE_FALLBACK = 10
 
@@ -230,9 +230,9 @@ def generate_linkedin_preview(
         return ""
 
     word_count = len(preview.split())
-    if word_count < 100 or word_count > 400:
+    if word_count < 100 or word_count > 220:
         logger.warning(
-            "linkedin_preview word count (%d) is outside expected 150-300 range",
+            "linkedin_preview word count (%d) is outside expected 120-220 range",
             word_count,
         )
 
