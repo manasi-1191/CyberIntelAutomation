@@ -246,6 +246,15 @@ def _verify() -> None:
             print("  ERROR: Token expired (401)")
             print("  Refresh it: python scripts/linkedin_setup.py --refresh")
             sys.exit(1)
+        elif resp.status_code in (403, 400):
+            # /v2/userinfo requires 'openid' scope from the "Sign In with LinkedIn"
+            # product. With only "Share on LinkedIn" the call is rejected — but the
+            # token is still valid for posting (w_member_social is all we need).
+            print("  Token obtained — posting scope (w_member_social) is active.")
+            print()
+            print("  Note: profile info not available without the")
+            print("  'Sign In with LinkedIn using OpenID Connect' product.")
+            print("  This does NOT affect LinkedIn publishing.")
         else:
             print(f"  ERROR: {resp.status_code} — {resp.text[:200]}")
             sys.exit(1)
@@ -289,11 +298,27 @@ def _whoami() -> None:
         elif resp.status_code == 401:
             print("  ERROR: Token expired — run: python scripts/linkedin_setup.py --refresh")
             sys.exit(1)
-        elif resp.status_code == 403:
-            print("  ERROR: Permission denied (403)")
-            print("  Your app may need 'r_liteprofile' or OpenID Connect scopes.")
-            print("  Re-run: python scripts/linkedin_setup.py")
-            sys.exit(1)
+        elif resp.status_code in (403, 400):
+            # /v2/me requires profile scope ('Sign In with LinkedIn' product).
+            # With only 'Share on LinkedIn' (w_member_social) this returns 403.
+            print("  Profile API not available with current scopes.")
+            print()
+            print("  To find your LinkedIn author URN, choose one of these options:")
+            print()
+            print("  Option A — Add 'Sign In with LinkedIn using OpenID Connect'")
+            print("  product to your app (usually instant approval), then re-run:")
+            print("    python scripts/linkedin_setup.py        (re-authorize)")
+            print("    python scripts/linkedin_setup.py --whoami")
+            print()
+            print("  Option B — Find your numeric member ID from your profile page:")
+            print("  1. Open your LinkedIn profile in a browser")
+            print("  2. View page source (Ctrl+U / Cmd+U)")
+            print("  3. Search for '\"memberId\"' in the source")
+            print("  4. The number after it is your member ID")
+            print("  5. Set: LINKEDIN_AUTHOR_URN=urn:li:person:<that-number>")
+            print()
+            print("  Option C — Get it from a LinkedIn API client or the")
+            print("  LinkedIn Developer Portal under your app's authorized users.")
         else:
             print(f"  ERROR: {resp.status_code} — {resp.text[:200]}")
             sys.exit(1)
