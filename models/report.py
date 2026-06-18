@@ -53,6 +53,9 @@ class DailyReport(BaseModel):
     published_at: Optional[datetime] = None
     published_content: str = ""    # Final content used (may be edited)
 
+    # LinkedIn content (generated during collect, shown in approval email)
+    linkedin_preview: str = ""       # exact post text; published on APPROVE
+
     # LinkedIn publish result (Phase 4)
     linkedin_post_id: str = ""
     linkedin_published_at: Optional[datetime] = None

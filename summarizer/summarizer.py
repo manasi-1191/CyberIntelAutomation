@@ -15,14 +15,17 @@ from models.report import DailyReport
 from models.extracted_event import ExtractedThreatEvent
 from summarizer.prompt_builder import (
     SUMMARY_SYSTEM,
+    LINKEDIN_SYSTEM,
     build_executive_summary_prompt,
     build_detailed_summary_prompt,
+    build_linkedin_preview_prompt,
 )
 
 logger = logging.getLogger(__name__)
 
 _EXEC_MAX_TOKENS = 150
 _DETAIL_MAX_TOKENS = 400
+_LINKEDIN_MAX_TOKENS = 700
 _RETRY_MULTIPLIER = 2
 _MIN_WORDS_BEFORE_FALLBACK = 10
 
@@ -195,3 +198,46 @@ def generate_summaries(
         exec_words, exec_source, detail_words, client.model,
     )
     return executive.strip(), detailed.strip()
+
+
+def generate_linkedin_preview(
+    report,
+    extracted: list,
+    client,
+) -> str:
+    """
+    Generate the LinkedIn post that will be shown in the approval email and
+    published verbatim on APPROVE.  Returns "" on failure — caller must treat
+    an empty result as a publish blocker.
+    """
+    if client is None:
+        return ""
+
+    preview = _generate_with_retry(
+        client,
+        system=LINKEDIN_SYSTEM,
+        user=build_linkedin_preview_prompt(report, extracted),
+        max_tokens=_LINKEDIN_MAX_TOKENS,
+        label="linkedin_preview",
+    )
+
+    if not preview:
+        logger.error(
+            "linkedin_preview generation failed — publishing will be blocked until "
+            "the AI pipeline is re-run: python main.py summarize --report-id %s",
+            report.report_id,
+        )
+        return ""
+
+    word_count = len(preview.split())
+    if word_count < 100 or word_count > 400:
+        logger.warning(
+            "linkedin_preview word count (%d) is outside expected 150-300 range",
+            word_count,
+        )
+
+    logger.info(
+        "linkedin_preview generated: %d words (model=%s)",
+        word_count, client.model,
+    )
+    return preview.strip()

@@ -166,7 +166,7 @@ def _run_ai_pipeline(report: DailyReport) -> None:
     """Phase 3: extract threat intelligence from events, then generate summaries."""
     from summarizer.ai_provider import get_ai_client
     from summarizer.extractor import extract_threat_events
-    from summarizer.summarizer import generate_summaries
+    from summarizer.summarizer import generate_summaries, generate_linkedin_preview
 
     client = get_ai_client()
     if client is None:
@@ -211,6 +211,23 @@ def _run_ai_pipeline(report: DailyReport) -> None:
             ),
         )
         logger.info("Summaries saved: %s", summaries_path)
+
+    # Phase 3C — generate LinkedIn preview (shown in approval email; published on APPROVE)
+    linkedin_preview = generate_linkedin_preview(report, extracted, client)
+    if linkedin_preview:
+        report.linkedin_preview = linkedin_preview
+        log_action(
+            AuditAction.AI_SUMMARY_GENERATED,
+            report_id=report.report_id,
+            detail=f"linkedin_preview={len(linkedin_preview.split())}w model={client.model}",
+        )
+        logger.info("LinkedIn preview generated: %d words", len(linkedin_preview.split()))
+    else:
+        logger.warning(
+            "LinkedIn preview is empty — publishing will be blocked. "
+            "Re-run: python main.py summarize --report-id %s",
+            report.report_id,
+        )
 
     save_report(report)
 
@@ -357,9 +374,9 @@ def _check_and_process_approval(report: DailyReport) -> None:
     report.approved_by = result.approved_by
 
     if result.status == "approved":
-        if not report.detailed_summary or not report.detailed_summary.strip():
+        if not report.linkedin_preview or not report.linkedin_preview.strip():
             logger.error(
-                "Cannot publish report %s: detailed_summary is empty. "
+                "Cannot publish report %s: linkedin_preview is empty. "
                 "Re-run AI pipeline: python main.py summarize --report-id %s",
                 report.report_id, report.report_id,
             )
@@ -368,17 +385,31 @@ def _check_and_process_approval(report: DailyReport) -> None:
                 report_id=report.report_id,
                 source="check_approval",
                 success=False,
-                error_message="detailed_summary empty — publish blocked",
+                error_message="linkedin_preview empty — publish blocked",
             )
             return
-        if not report.executive_summary or not report.executive_summary.strip():
+        if "PLACEHOLDER" in report.linkedin_preview:
+            logger.error(
+                "Cannot publish report %s: linkedin_preview contains PLACEHOLDER — "
+                "AI generation incomplete. Re-run: python main.py summarize --report-id %s",
+                report.report_id, report.report_id,
+            )
+            log_action(
+                AuditAction.ERROR,
+                report_id=report.report_id,
+                source="check_approval",
+                success=False,
+                error_message="linkedin_preview contains PLACEHOLDER — publish blocked",
+            )
+            return
+        if not report.detailed_summary or not report.detailed_summary.strip():
             logger.warning(
-                "Report %s: executive_summary is empty — email showed incomplete briefing. "
+                "Report %s: detailed_summary is empty — email showed incomplete briefing. "
                 "Re-run: python main.py summarize --report-id %s",
                 report.report_id, report.report_id,
             )
         report.approval_status = ApprovalStatus.APPROVED
-        report.published_content = report.detailed_summary
+        report.published_content = report.linkedin_preview
         log_action(AuditAction.APPROVAL_RECEIVED, report_id=report.report_id,
                    detail=f"approved by {result.approved_by}")
         logger.info("APPROVED by %s", result.approved_by)

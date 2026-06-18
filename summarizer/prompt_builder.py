@@ -7,6 +7,15 @@ import json
 from models.report import DailyReport
 from models.extracted_event import ExtractedThreatEvent
 
+LINKEDIN_SYSTEM = (
+    "You are a professional cybersecurity threat intelligence author writing for an audience of "
+    "CISOs, security leaders, IT directors, and enterprise decision-makers. "
+    "Write in a professional, concise, and informative tone. "
+    "Be direct and factual. Do not sensationalise, do not use marketing language, do not use clickbait. "
+    "Every statement must be grounded in the intelligence provided — do not invent facts. "
+    "If information is unavailable, omit that point rather than guessing."
+)
+
 EXTRACTION_SYSTEM = (
     "You are a cybersecurity analyst extracting structured intelligence from threat reports. "
     "Output must be valid JSON only — no markdown fences, no explanation, no trailing text. "
@@ -127,3 +136,80 @@ def _event_context(extracted: list[ExtractedThreatEvent]) -> str:
             parts.append(f"mitigation={e.enterprise_mitigations[0]}")
         lines.append("  - " + " | ".join(parts))
     return "\n".join(lines)
+
+
+def build_linkedin_preview_prompt(
+    report: DailyReport,
+    extracted: list[ExtractedThreatEvent],
+) -> str:
+    """
+    Prompt for generating the LinkedIn post shown in the approval email.
+    The output is the exact text to publish if APPROVE is received.
+    """
+    vuln_ctx = _vuln_context(report)
+    event_ctx = _event_context(extracted)
+
+    has_vulns = bool(report.featured_vulnerabilities)
+    has_events = bool(extracted)
+    has_breaches = report.breach_count > 0
+    has_attacks = report.attack_count > 0
+
+    # Build a focused instruction based on what data is actually available
+    coverage_notes = []
+    if has_vulns:
+        coverage_notes.append(
+            f"- {report.critical_cve_count} critical CVE(s), {report.kev_count} actively exploited "
+            "(in CISA KEV) — include CVE IDs where relevant"
+        )
+    if has_attacks:
+        coverage_notes.append(f"- {report.attack_count} cyber attack(s) detected")
+    if has_breaches:
+        coverage_notes.append(f"- {report.breach_count} data breach(es) detected")
+    if not coverage_notes:
+        coverage_notes.append("- Limited intelligence available for this period")
+
+    coverage_block = "\n".join(coverage_notes)
+
+    return f"""Write a LinkedIn threat intelligence post for the 48-hour period ending {report.report_id}.
+
+AUDIENCE: CISOs, security leaders, IT directors, security engineers, enterprise decision-makers.
+
+TONE: Professional, concise, factual. No marketing language. No sensationalism. No generic filler.
+Every bullet must be grounded in the intelligence below — omit any section where data is unavailable.
+
+LENGTH: 150–300 words (count carefully).
+
+REQUIRED STRUCTURE (use this exact format):
+
+[One-line hook — start with a single relevant emoji, followed by a concise headline of the most significant development]
+
+[2–3 sentence overview of the most important threat developments this period]
+
+Key developments — last 48 hours:
+
+• [Vulnerability highlights — include CVE IDs, severity, exploitation status]
+• [Attack highlights — include threat actor, attack type, targeted sector]
+• [Breach highlights — include organizations, data type, scale if known]
+• [Threat actor highlights — attribution, motivation, TTPs if known]
+
+(Omit any bullet category if no relevant intelligence is available.)
+
+Enterprise considerations:
+
+• [Key lesson or defensive takeaway]
+• [Recommended action or control]
+• [Security theme or pattern observed]
+
+(Omit any bullet if not supported by the intelligence.)
+
+[3–5 relevant hashtags — choose from: #CyberSecurity #ThreatIntelligence #InfoSec #CyberDefense #VulnerabilityManagement #DataBreach #Ransomware #ZeroDay #APT #CISO]
+
+INTELLIGENCE:
+{vuln_ctx}
+
+{event_ctx}
+
+COVERAGE AVAILABLE:
+{coverage_block}
+
+Output ONLY the LinkedIn post text — no heading, no label, no explanation, no quotation marks."""

@@ -29,6 +29,10 @@ def build_approval_email(report: DailyReport) -> MIMEMultipart:
 
 def _build_plain(report: DailyReport, date_label: str) -> str:
     total = len(report.vulnerabilities) + len(report.threat_events)
+    preview_text = report.linkedin_preview.strip() if report.linkedin_preview else (
+        "[LinkedIn Preview not yet generated — "
+        "re-run: python main.py summarize --report-id " + report.report_id + "]"
+    )
     lines = [
         f"CYBERINTEL — DAILY THREAT REPORT: {date_label}",
         "=" * 60,
@@ -54,12 +58,19 @@ def _build_plain(report: DailyReport, date_label: str) -> str:
         _top_cves_plain(report),
         "",
         "=" * 60,
+        "LINKEDIN PREVIEW",
+        "=" * 60,
+        "This is the exact post that will be published to LinkedIn if you reply APPROVE.",
+        "",
+        preview_text,
+        "",
+        "=" * 60,
         "HOW TO RESPOND",
         "=" * 60,
         "",
-        "  Reply APPROVE   → Publish the Detailed Summary to LinkedIn",
+        "  Reply APPROVE   → Publish the LinkedIn Preview above exactly as shown",
         "  Reply REJECT    → Skip publishing for today",
-        "  Attach .txt     → Publish your edited content instead",
+        "  Attach .txt     → Publish your edited content instead of the Preview",
         "",
         "Nothing will be published without your explicit approval.",
         "",
@@ -95,6 +106,7 @@ def _wrap(text: str, width: int = 76, indent: str = "") -> str:
 def _build_html(report: DailyReport, date_label: str) -> str:
     total = len(report.vulnerabilities) + len(report.threat_events)
     top_cves_html = _top_cves_html(report)
+    linkedin_preview_html = _linkedin_preview_html(report)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -126,6 +138,16 @@ def _build_html(report: DailyReport, date_label: str) -> str:
   table.cves tr:hover td {{ background: #fafafa; }}
   .kev-badge {{ background: #c0392b; color: #fff; font-size: 10px; font-weight: 700;
                 padding: 2px 6px; border-radius: 3px; text-transform: uppercase; }}
+  .linkedin-box {{ background: #f0f7ff; border: 2px solid #0a66c2; border-radius: 8px;
+                   padding: 20px 24px; margin-top: 28px; }}
+  .linkedin-box .li-label {{ font-size: 11px; font-weight: 700; letter-spacing: .1em;
+                              text-transform: uppercase; color: #0a66c2; margin-bottom: 10px; }}
+  .linkedin-box .li-content {{ font-size: 14px; line-height: 1.7; color: #1a1a1a;
+                                white-space: pre-wrap; font-family: inherit; }}
+  .linkedin-box .li-note {{ font-size: 12px; color: #555; margin-top: 12px;
+                             border-top: 1px solid #c8dff5; padding-top: 10px; }}
+  .linkedin-missing {{ background: #fff8e1; border: 2px solid #f0ad4e; border-radius: 8px;
+                       padding: 16px 20px; margin-top: 28px; font-size: 13px; color: #856404; }}
   .approval-box {{ background: #1a1a2e; color: #e0e0e0; border-radius: 8px;
                    padding: 24px; margin-top: 28px; }}
   .approval-box h2 {{ color: #aaa; border-color: #333; }}
@@ -172,11 +194,13 @@ def _build_html(report: DailyReport, date_label: str) -> str:
   <h2>Top Critical CVEs</h2>
   {top_cves_html}
 
+  {linkedin_preview_html}
+
   <div class="approval-box">
     <h2>How to Respond</h2>
-    <p><code>APPROVE</code> &nbsp;→&nbsp; Publish the Detailed Summary to LinkedIn</p>
+    <p><code>APPROVE</code> &nbsp;→&nbsp; Publish the LinkedIn Preview above exactly as shown</p>
     <p><code>REJECT</code> &nbsp;→&nbsp; Skip publishing for today</p>
-    <p>Attach a <code>.txt</code> file &nbsp;→&nbsp; Publish your edited content instead</p>
+    <p>Attach a <code>.txt</code> file &nbsp;→&nbsp; Publish your edited content instead of the Preview</p>
     <p style="margin-top:14px;color:#888;font-size:12px;">
       Nothing will be published without your explicit approval.<br>
       Generated: {report.generated_at.strftime('%Y-%m-%d %H:%M UTC')}
@@ -186,6 +210,29 @@ def _build_html(report: DailyReport, date_label: str) -> str:
 <div class="footer">CyberIntel Automation &nbsp;·&nbsp; {report.report_id}</div>
 </body>
 </html>"""
+
+
+def _linkedin_preview_html(report: DailyReport) -> str:
+    if not report.linkedin_preview or not report.linkedin_preview.strip():
+        return (
+            '<div class="linkedin-missing">'
+            '<strong>⚠ LinkedIn Preview not available</strong> — '
+            'AI pipeline did not generate a preview for this report. '
+            f'Re-run: <code>python main.py summarize --report-id {report.report_id}</code>. '
+            'Publishing will be blocked until the preview is generated.'
+            '</div>'
+        )
+    # Escape HTML special characters in the preview text
+    import html as _html
+    preview_escaped = _html.escape(report.linkedin_preview.strip())
+    return f"""<div class="linkedin-box">
+  <div class="li-label">LinkedIn Preview — exact post that will be published on APPROVE</div>
+  <pre class="li-content">{preview_escaped}</pre>
+  <div class="li-note">
+    Reply <strong>APPROVE</strong> to publish this post exactly as shown &nbsp;·&nbsp;
+    Attach a <strong>.txt</strong> file to publish edited content instead
+  </div>
+</div>"""
 
 
 def _top_cves_html(report: DailyReport) -> str:
