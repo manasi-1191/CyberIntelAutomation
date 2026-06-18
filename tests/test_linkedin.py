@@ -50,14 +50,20 @@ def _prod_settings(
 
 class TestPublishTestModeGuard:
     def test_raises_runtime_error_in_test_mode(self):
-        """publish_post must raise RuntimeError when settings.test_mode is True (the default)."""
-        with pytest.raises(RuntimeError, match="TEST_MODE"):
-            publish_post("Content", _VALID_URN)
+        """publish_post must raise RuntimeError when settings.test_mode is True."""
+        mock_s = MagicMock()
+        mock_s.test_mode = True
+        with patch("linkedin.publisher.settings", mock_s):
+            with pytest.raises(RuntimeError, match="TEST_MODE"):
+                publish_post("Content", _VALID_URN)
 
     def test_raises_even_with_valid_credentials(self):
         """TEST_MODE guard fires before any credential or URN check."""
-        with pytest.raises(RuntimeError, match="TEST_MODE"):
-            publish_post("Content", _VALID_URN, report_id="2026-06-17")
+        mock_s = MagicMock()
+        mock_s.test_mode = True
+        with patch("linkedin.publisher.settings", mock_s):
+            with pytest.raises(RuntimeError, match="TEST_MODE"):
+                publish_post("Content", _VALID_URN, report_id="2026-06-17")
 
 
 # ── Publisher: success path ───────────────────────────────────────────────────
