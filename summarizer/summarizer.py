@@ -52,29 +52,36 @@ def _generate_with_retry(
     - Both attempts produce < _MIN_WORDS_BEFORE_FALLBACK words of text.
     """
     result = client.complete(system=system, user=user, max_tokens=max_tokens) or ""
-    if not result:
-        return ""
 
-    if _is_complete(result):
+    # Return immediately only when the response is both present and complete
+    if result and _is_complete(result):
         return result
 
-    logger.warning(
-        "%s summary appears truncated (%d words, no sentence terminator) "
-        "— retrying with %dx token budget",
-        label, len(result.split()), _RETRY_MULTIPLIER,
-    )
+    # Retry for either empty result OR truncated result (no sentence terminator)
+    if not result:
+        logger.warning(
+            "%s summary empty on first attempt — retrying with %dx token budget",
+            label, _RETRY_MULTIPLIER,
+        )
+    else:
+        logger.warning(
+            "%s summary appears truncated (%d words, no sentence terminator) "
+            "— retrying with %dx token budget",
+            label, len(result.split()), _RETRY_MULTIPLIER,
+        )
 
     retry = client.complete(
         system=system, user=user, max_tokens=max_tokens * _RETRY_MULTIPLIER
     ) or ""
 
     if retry and _is_complete(retry):
-        logger.info(
-            "%s summary completed on retry (%d words)", label, len(retry.split())
-        )
+        if result:
+            logger.info(
+                "%s summary completed on retry (%d words)", label, len(retry.split())
+            )
         return retry
 
-    # Both attempts incomplete — use the longer one, or fall back to placeholder
+    # Both attempts empty/incomplete — use the longer one, or fall back to placeholder
     best = retry if len(retry) > len(result) else result
     if len(best.split()) < _MIN_WORDS_BEFORE_FALLBACK:
         logger.warning(
@@ -90,6 +97,38 @@ def _generate_with_retry(
     return best
 
 
+def _build_fallback_executive(detailed: str) -> str:
+    """
+    Deterministic fallback for executive_summary when AI returns empty.
+    Extracts the first complete sentence(s) from detailed_summary up to 50 words.
+    Returns "" if detailed cannot yield at least _MIN_WORDS_BEFORE_FALLBACK words.
+    """
+    sentences = re.split(r'(?<=[.!?])\s+', detailed.strip())
+    parts: list[str] = []
+    word_count = 0
+    for sentence in sentences:
+        sentence_words = len(sentence.split())
+        if word_count + sentence_words <= 50:
+            parts.append(sentence)
+            word_count += sentence_words
+        else:
+            break
+
+    if parts and word_count >= _MIN_WORDS_BEFORE_FALLBACK:
+        return " ".join(parts)
+
+    # detailed may be one long run-on sentence — take first 45 words and snap to
+    # the last sentence boundary within that window
+    words = detailed.split()
+    if len(words) < _MIN_WORDS_BEFORE_FALLBACK:
+        return ""
+    snippet = " ".join(words[:45])
+    last_end = max(snippet.rfind("."), snippet.rfind("!"), snippet.rfind("?"))
+    if last_end > len(snippet) // 3:
+        return snippet[:last_end + 1]
+    return snippet.rstrip(",:;") + "."
+
+
 def generate_summaries(
     report: DailyReport,
     extracted: list[ExtractedThreatEvent],
@@ -98,6 +137,8 @@ def generate_summaries(
     """
     Return (executive_summary, detailed_summary).
     Returns ("", "") if client is None — caller retains placeholder text.
+    If AI returns empty for executive but detailed is non-empty, a deterministic
+    fallback is derived from detailed_summary.
     Never raises.
     """
     if client is None:
@@ -119,6 +160,22 @@ def generate_summaries(
         label="detailed",
     )
 
+    exec_source = "AI"
+    if not executive and detailed:
+        executive = _build_fallback_executive(detailed)
+        exec_source = "FALLBACK"
+        if executive:
+            logger.warning(
+                "executive_summary [FALLBACK]: AI returned empty — derived %d words "
+                "from detailed_summary",
+                len(executive.split()),
+            )
+        else:
+            logger.error(
+                "executive_summary [FALLBACK]: could not derive from detailed_summary "
+                "— executive_summary will be empty"
+            )
+
     exec_words = len(executive.split()) if executive else 0
     detail_words = len(detailed.split()) if detailed else 0
 
@@ -134,7 +191,7 @@ def generate_summaries(
         )
 
     logger.info(
-        "Summaries generated: executive=%d words, detailed=%d words (model=%s)",
-        exec_words, detail_words, client.model,
+        "Summaries generated: executive=%d words [%s], detailed=%d words (model=%s)",
+        exec_words, exec_source, detail_words, client.model,
     )
     return executive.strip(), detailed.strip()

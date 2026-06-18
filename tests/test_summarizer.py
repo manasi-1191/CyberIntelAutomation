@@ -596,6 +596,94 @@ class TestSummarizer:
         assert "ransomware campaigns" in executive
         assert "ransomware campaigns" in detailed
 
+    def test_fallback_executive_when_ai_returns_empty(self):
+        """
+        When AI returns empty for all executive attempts but detailed succeeds,
+        generate_summaries must apply the deterministic fallback and return a
+        non-empty executive_summary.
+        """
+        report = _report()
+        calls = [0]
+
+        detailed_text = (
+            "CVE-2026-1111 is actively exploited by threat actors targeting government "
+            "and critical infrastructure sectors. Organizations running affected systems "
+            "must apply patches immediately and enable network monitoring to detect exploitation."
+        )
+
+        def fake_complete(system, user, max_tokens=400):
+            calls[0] += 1
+            if calls[0] <= 2:
+                # Both executive attempts (first + retry) return empty
+                return None
+            # Detailed attempts return content
+            return detailed_text
+
+        client = _MockClient()
+        client.complete = fake_complete
+        executive, detailed = generate_summaries(report, [], client)
+
+        assert detailed == detailed_text.strip(), "detailed_summary should be the AI result"
+        assert executive != "", "fallback must produce a non-empty executive_summary"
+        assert len(executive.split()) <= 50, "fallback must respect the 50-word limit"
+        assert len(executive.split()) >= 10, "fallback must be meaningful (≥10 words)"
+
+    def test_no_fallback_when_both_summaries_empty(self):
+        """When AI fails entirely (both summaries empty) no fallback is attempted."""
+        report = _report()
+        client = _MockClient(response=None)
+        executive, detailed = generate_summaries(report, [], client)
+        assert executive == ""
+        assert detailed == ""
+
+
+# ── Fallback executive builder ────────────────────────────────────────────────
+
+class TestBuildFallbackExecutive:
+    def test_extracts_first_complete_sentence(self):
+        from summarizer.summarizer import _build_fallback_executive
+        detailed = (
+            "CVE-2026-1111 is actively exploited in the wild. "
+            "Nation-state actors are targeting financial institutions with ransomware."
+        )
+        result = _build_fallback_executive(detailed)
+        assert "CVE-2026-1111" in result
+        assert result.endswith(".")
+
+    def test_stays_within_50_words(self):
+        from summarizer.summarizer import _build_fallback_executive
+        # Construct detailed with two long sentences
+        long_detailed = (
+            "A critical vulnerability affecting millions of enterprise systems has been "
+            "disclosed and is actively exploited in the wild by advanced persistent threat groups. "
+            "Security teams must apply the vendor patch within 24 hours to prevent "
+            "data exfiltration and ransomware deployment across affected networks."
+        )
+        result = _build_fallback_executive(long_detailed)
+        assert len(result.split()) <= 50
+
+    def test_returns_empty_when_detailed_too_short(self):
+        from summarizer.summarizer import _build_fallback_executive
+        assert _build_fallback_executive("Too short.") == ""
+
+    def test_handles_long_single_sentence(self):
+        from summarizer.summarizer import _build_fallback_executive
+        # One sentence longer than 50 words — should truncate to first 45 words
+        long_sentence = (
+            "CVE-2026-1111 is a critical vulnerability actively exploited by nation-state "
+            "threat actors targeting government finance and critical infrastructure sectors "
+            "worldwide enabling remote code execution without authentication on all affected "
+            "systems running versions prior to the security patch released this week by the vendor "
+            "and organizations must patch immediately or face severe data loss."
+        )
+        result = _build_fallback_executive(long_sentence)
+        assert result != ""
+        assert len(result.split()) <= 50
+
+    def test_returns_empty_when_detailed_is_empty(self):
+        from summarizer.summarizer import _build_fallback_executive
+        assert _build_fallback_executive("") == ""
+
 
 # ── is_complete helper ────────────────────────────────────────────────────────
 

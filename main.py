@@ -344,6 +344,26 @@ def _check_and_process_approval(report: DailyReport) -> None:
     report.approved_by = result.approved_by
 
     if result.status == "approved":
+        if not report.detailed_summary or not report.detailed_summary.strip():
+            logger.error(
+                "Cannot publish report %s: detailed_summary is empty. "
+                "Re-run AI pipeline: python main.py summarize --report-id %s",
+                report.report_id, report.report_id,
+            )
+            log_action(
+                AuditAction.ERROR,
+                report_id=report.report_id,
+                source="check_approval",
+                success=False,
+                error_message="detailed_summary empty — publish blocked",
+            )
+            return
+        if not report.executive_summary or not report.executive_summary.strip():
+            logger.warning(
+                "Report %s: executive_summary is empty — email showed incomplete briefing. "
+                "Re-run: python main.py summarize --report-id %s",
+                report.report_id, report.report_id,
+            )
         report.approval_status = ApprovalStatus.APPROVED
         report.published_content = report.detailed_summary
         log_action(AuditAction.APPROVAL_RECEIVED, report_id=report.report_id,
