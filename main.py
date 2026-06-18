@@ -124,6 +124,19 @@ def cmd_collect(args: argparse.Namespace) -> None:
         sc["high"], sc["medium"], sc["low_unknown"],
     )
 
+    # Preserve linkedin_preview from any prior run before build_report resets it.
+    # load_report reads the file that was saved by the *previous* collect run;
+    # once save_report() runs below it will be overwritten with the new report.
+    _prior_preview = ""
+    if not dry_run:
+        _prior = load_report(report_id)
+        if _prior and _prior.linkedin_preview and "PLACEHOLDER" not in _prior.linkedin_preview:
+            _prior_preview = _prior.linkedin_preview
+            logger.info(
+                "Carrying forward linkedin_preview from prior run (%d words)",
+                len(_prior_preview.split()),
+            )
+
     # 7. Build report
     report = build_report(
         report_id=report_id,
@@ -133,6 +146,8 @@ def cmd_collect(args: argparse.Namespace) -> None:
         threat_events=unique_events,
         collection_window_hours=settings.collection_window_hours,
     )
+    if _prior_preview:
+        report.linkedin_preview = _prior_preview
 
     # 8. Persist
     if not dry_run:
@@ -222,11 +237,26 @@ def _run_ai_pipeline(report: DailyReport) -> None:
             detail=f"linkedin_preview={len(linkedin_preview.split())}w model={client.model}",
         )
         logger.info("LinkedIn preview generated: %d words", len(linkedin_preview.split()))
+    elif report.linkedin_preview:
+        # AI + fallback both failed but a valid preview was carried forward from a prior run.
+        logger.info(
+            "LinkedIn preview generation returned empty — keeping existing preview "
+            "from prior run (%d words)",
+            len(report.linkedin_preview.split()),
+        )
     else:
         logger.warning(
-            "LinkedIn preview is empty — publishing will be blocked. "
+            "LinkedIn preview is empty and no prior preview is available — "
+            "publishing will be blocked. "
             "Re-run: python main.py summarize --report-id %s",
             report.report_id,
+        )
+        log_action(
+            AuditAction.ERROR,
+            report_id=report.report_id,
+            detail="linkedin_preview empty — AI failed and no fallback or prior preview available",
+            success=False,
+            error_message="linkedin_preview generation failed with no fallback",
         )
 
     save_report(report)
@@ -255,7 +285,40 @@ def cmd_send_email(args: argparse.Namespace) -> None:
     _send_email_for_report(report)
 
 
+def _report_ready_for_email(report: DailyReport) -> tuple[bool, str]:
+    """
+    Returns (ready, reason).  True only when all three content fields are
+    populated and linkedin_preview is free of PLACEHOLDER markers.
+    """
+    if not report.executive_summary:
+        return False, "executive_summary is empty"
+    if not report.detailed_summary:
+        return False, "detailed_summary is empty"
+    if not report.linkedin_preview or not report.linkedin_preview.strip():
+        return False, "linkedin_preview is empty"
+    if "PLACEHOLDER" in report.linkedin_preview:
+        return False, "linkedin_preview contains PLACEHOLDER"
+    return True, ""
+
+
 def _send_email_for_report(report: DailyReport) -> None:
+    ready, reason = _report_ready_for_email(report)
+    if not ready:
+        logger.error(
+            "Approval email blocked — required content not ready for report %s: %s. "
+            "Re-run: python main.py summarize --report-id %s",
+            report.report_id, reason, report.report_id,
+        )
+        log_action(
+            AuditAction.ERROR,
+            report_id=report.report_id,
+            source="emailer",
+            detail=f"email blocked — {reason}",
+            success=False,
+            error_message=reason,
+        )
+        return
+
     from emailer.gmail_auth import is_configured, GmailCredentialsError
     from emailer.sender import send_approval_email
 
