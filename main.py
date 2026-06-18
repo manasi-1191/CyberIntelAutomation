@@ -320,6 +320,19 @@ def _check_and_process_approval(report: DailyReport) -> None:
     from emailer.approval_poller import check_for_reply
     from emailer.gmail_auth import GmailCredentialsError
 
+    if report.linkedin_post_id:
+        logger.info(
+            "Report %s already published (linkedin_post_id=%s) — skipping",
+            report.report_id, report.linkedin_post_id,
+        )
+        return
+    if report.approval_status in (ApprovalStatus.APPROVED, ApprovalStatus.EDITED_APPROVED):
+        logger.info(
+            "Report %s already processed (status=%s) — skipping re-poll",
+            report.report_id, report.approval_status,
+        )
+        return
+
     logger.info("Polling Gmail for report %s (thread %s)", report.report_id, report.gmail_thread_id)
     log_action(AuditAction.APPROVAL_POLL_CHECKED, report_id=report.report_id,
                detail=f"thread_id={report.gmail_thread_id}")
@@ -415,6 +428,13 @@ def _publish_to_linkedin(report: DailyReport) -> None:
     """Publish approved content to LinkedIn. Falls back to manual file on any failure."""
     from linkedin.auth import is_configured as linkedin_is_configured
     from linkedin.publisher import publish_post
+
+    if report.linkedin_post_id:
+        logger.info(
+            "Report %s already has linkedin_post_id=%s — skipping duplicate publish",
+            report.report_id, report.linkedin_post_id,
+        )
+        return
 
     if not linkedin_is_configured():
         logger.warning(

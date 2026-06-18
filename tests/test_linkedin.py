@@ -6,6 +6,7 @@ settings.test_mode is patched to False on tests that exercise the publish path
 — the default value (True) is verified by the TEST_MODE guard tests.
 """
 import json
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -19,6 +20,8 @@ from linkedin.publisher import (
     _validate_author_urn,
     publish_post,
 )
+from main import _check_and_process_approval, _publish_to_linkedin
+from models.report import ApprovalStatus, DailyReport
 
 _POST_URL = "https://api.linkedin.com/v2/ugcPosts"
 _TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
@@ -313,3 +316,67 @@ class TestTryRefreshToken:
             with patch("linkedin.auth.settings", mock_s):
                 result = try_refresh_token()
         assert result is None
+
+
+# ── Duplicate-publish guards ──────────────────────────────────────────────────
+
+def _make_report(**kwargs) -> DailyReport:
+    defaults = dict(
+        report_id="2026-06-17",
+        window_start=datetime(2026, 6, 16),
+        window_end=datetime(2026, 6, 17),
+        detailed_summary="Detailed content.",
+        published_content="Published content.",
+        gmail_thread_id="thread-abc",
+        gmail_message_id="msg-abc",
+    )
+    defaults.update(kwargs)
+    return DailyReport(**defaults)
+
+
+class TestDuplicatePublishGuards:
+    """Guards preventing double-posting to LinkedIn."""
+
+    def test_publish_to_linkedin_skips_if_post_id_already_set(self):
+        """_publish_to_linkedin must not call publish_post if linkedin_post_id is already set."""
+        report = _make_report(linkedin_post_id="urn:li:ugcPost:already-posted")
+
+        with patch("linkedin.auth.is_configured", return_value=True) as mock_configured, \
+             patch("linkedin.publisher.publish_post") as mock_publish:
+            _publish_to_linkedin(report)
+
+        mock_configured.assert_not_called()
+        mock_publish.assert_not_called()
+
+    def test_check_approval_skips_if_linkedin_post_id_set(self):
+        """_check_and_process_approval must not re-poll or re-publish when post_id is set."""
+        report = _make_report(linkedin_post_id="urn:li:ugcPost:already-posted")
+
+        with patch("emailer.approval_poller.check_for_reply") as mock_poll, \
+             patch("main._publish_to_linkedin") as mock_publish:
+            _check_and_process_approval(report)
+
+        mock_poll.assert_not_called()
+        mock_publish.assert_not_called()
+
+    def test_check_approval_skips_if_already_approved(self):
+        """_check_and_process_approval must not reprocess reports already in APPROVED state."""
+        report = _make_report(approval_status=ApprovalStatus.APPROVED)
+
+        with patch("emailer.approval_poller.check_for_reply") as mock_poll, \
+             patch("main._publish_to_linkedin") as mock_publish:
+            _check_and_process_approval(report)
+
+        mock_poll.assert_not_called()
+        mock_publish.assert_not_called()
+
+    def test_check_approval_skips_if_already_edited_approved(self):
+        """_check_and_process_approval must not reprocess reports in EDITED_APPROVED state."""
+        report = _make_report(approval_status=ApprovalStatus.EDITED_APPROVED)
+
+        with patch("emailer.approval_poller.check_for_reply") as mock_poll, \
+             patch("main._publish_to_linkedin") as mock_publish:
+            _check_and_process_approval(report)
+
+        mock_poll.assert_not_called()
+        mock_publish.assert_not_called()
