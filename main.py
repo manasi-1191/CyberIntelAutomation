@@ -13,6 +13,7 @@ Commands:
 """
 import argparse
 import logging
+import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -41,6 +42,48 @@ from models.audit import AuditAction
 from models.report import DailyReport, ApprovalStatus
 
 
+# ── Collect lock ─────────────────────────────────────────────────────────────
+
+def _acquire_collect_lock() -> Path | None:
+    """
+    Write a PID lock file so two collect runs cannot overlap.
+    Returns the lock Path on success, or None if another run is already active.
+    Stale locks whose PID is no longer running are cleaned up automatically.
+    """
+    lock_path = settings.data_dir / ".collect.lock"
+    if lock_path.exists():
+        try:
+            pid = int(lock_path.read_text().strip())
+            os.kill(pid, 0)   # signal 0 = existence check only, no signal sent
+            logger.warning(
+                "collect already running (PID %d) — exiting to prevent duplicate run",
+                pid,
+            )
+            log_action(
+                AuditAction.ERROR,
+                detail=f"collect skipped — already running under PID {pid}",
+                success=False,
+                error_message="duplicate collect prevented by lockfile",
+            )
+            return None
+        except (ValueError, ProcessLookupError):
+            # PID in lock file is gone — stale lock, safe to remove
+            logger.info("Removing stale collect lock (PID no longer running)")
+            lock_path.unlink(missing_ok=True)
+        except PermissionError:
+            # Cannot signal the process — treat as active to be safe
+            logger.warning("Cannot verify collect lock PID — skipping run to be safe")
+            return None
+    lock_path.write_text(str(os.getpid()))
+    return lock_path
+
+
+def _release_collect_lock(lock_path: Path | None) -> None:
+    """Remove the collect lock file, ignoring errors if already gone."""
+    if lock_path and lock_path.exists():
+        lock_path.unlink(missing_ok=True)
+
+
 # ── Collect ───────────────────────────────────────────────────────────────────
 
 def cmd_collect(args: argparse.Namespace) -> None:
@@ -64,115 +107,123 @@ def cmd_collect(args: argparse.Namespace) -> None:
         logger.info("TEST_MODE=true — LinkedIn publishing disabled")
 
     settings.ensure_dirs()
-    log_action(AuditAction.COLLECTION_STARTED, report_id=report_id)
+    lock_path = _acquire_collect_lock()
+    if lock_path is None:
+        return
 
-    # 1. Collect
-    collectors = [
-        CisaKevCollector(window_start, window_end),
-        CisaAdvisoriesCollector(window_start, window_end),
-        NvdCveCollector(window_start, window_end),
-        RssFeedCollector(window_start, window_end),
-    ]
+    try:
+        log_action(AuditAction.COLLECTION_STARTED, report_id=report_id)
 
-    all_vulns, all_events = [], []
-    for collector in collectors:
-        try:
-            v, e = collector.collect()
-            all_vulns.extend(v)
-            all_events.extend(e)
-            log_action(
-                AuditAction.ITEM_COLLECTED,
-                report_id=report_id,
-                source=collector.name,
-                detail=f"{len(v)} vulns, {len(e)} events",
-            )
-        except Exception as exc:
-            logger.error("Collector %s failed: %s", collector.name, exc)
-            log_action(
-                AuditAction.ERROR,
-                report_id=report_id,
-                source=collector.name,
-                success=False,
-                error_message=str(exc),
-            )
+        # 1. Collect
+        collectors = [
+            CisaKevCollector(window_start, window_end),
+            CisaAdvisoriesCollector(window_start, window_end),
+            NvdCveCollector(window_start, window_end),
+            RssFeedCollector(window_start, window_end),
+        ]
 
-    logger.info("Collected: %d vulns, %d events (pre-dedup)", len(all_vulns), len(all_events))
+        all_vulns, all_events = [], []
+        for collector in collectors:
+            try:
+                v, e = collector.collect()
+                all_vulns.extend(v)
+                all_events.extend(e)
+                log_action(
+                    AuditAction.ITEM_COLLECTED,
+                    report_id=report_id,
+                    source=collector.name,
+                    detail=f"{len(v)} vulns, {len(e)} events",
+                )
+            except Exception as exc:
+                logger.error("Collector %s failed: %s", collector.name, exc)
+                log_action(
+                    AuditAction.ERROR,
+                    report_id=report_id,
+                    source=collector.name,
+                    success=False,
+                    error_message=str(exc),
+                )
 
-    # 2. Normalize
-    all_vulns = normalize_vulnerabilities(all_vulns)
-    all_events = normalize_events(all_events)
+        logger.info("Collected: %d vulns, %d events (pre-dedup)", len(all_vulns), len(all_events))
 
-    # 3. Filter
-    all_vulns = filter_vulnerabilities(all_vulns, window_start, window_end)
-    all_events = filter_events(all_events, window_start, window_end)
-    logger.info("After filter: %d vulns, %d events", len(all_vulns), len(all_events))
+        # 2. Normalize
+        all_vulns = normalize_vulnerabilities(all_vulns)
+        all_events = normalize_events(all_events)
 
-    # 4. Deduplicate (within-run only)
-    unique_vulns, unique_events, dupe_count = deduplicate(all_vulns, all_events)
-    log_action(AuditAction.ITEM_DEDUPLICATED, report_id=report_id,
-               detail=f"{dupe_count} within-run duplicates removed")
+        # 3. Filter
+        all_vulns = filter_vulnerabilities(all_vulns, window_start, window_end)
+        all_events = filter_events(all_events, window_start, window_end)
+        logger.info("After filter: %d vulns, %d events", len(all_vulns), len(all_events))
 
-    # 5. Enrich — mark KEV flag on any CVE that appears in the KEV catalog
-    unique_vulns = enrich_with_kev(unique_vulns)
+        # 4. Deduplicate (within-run only)
+        unique_vulns, unique_events, dupe_count = deduplicate(all_vulns, all_events)
+        log_action(AuditAction.ITEM_DEDUPLICATED, report_id=report_id,
+                   detail=f"{dupe_count} within-run duplicates removed")
 
-    # 6. Prioritize — assign tiers and sort
-    unique_vulns = assign_priority_tiers(unique_vulns)
-    sc = severity_counts(unique_vulns)
-    logger.info(
-        "Priority tiers: KEV=%d  CRITICAL(CVSS≥9)=%d  CRITICAL=%d  HIGH=%d  MEDIUM=%d  LOW/UNK=%d",
-        sc["kev"], sc["critical_high_cvss"], sc["critical"],
-        sc["high"], sc["medium"], sc["low_unknown"],
-    )
+        # 5. Enrich — mark KEV flag on any CVE that appears in the KEV catalog
+        unique_vulns = enrich_with_kev(unique_vulns)
 
-    # Preserve linkedin_preview from any prior run before build_report resets it.
-    # load_report reads the file that was saved by the *previous* collect run;
-    # once save_report() runs below it will be overwritten with the new report.
-    _prior_preview = ""
-    if not dry_run:
-        _prior = load_report(report_id)
-        if _prior and _prior.linkedin_preview and "PLACEHOLDER" not in _prior.linkedin_preview:
-            _prior_preview = _prior.linkedin_preview
-            logger.info(
-                "Carrying forward linkedin_preview from prior run (%d words)",
-                len(_prior_preview.split()),
-            )
+        # 6. Prioritize — assign tiers and sort
+        unique_vulns = assign_priority_tiers(unique_vulns)
+        sc = severity_counts(unique_vulns)
+        logger.info(
+            "Priority tiers: KEV=%d  CRITICAL(CVSS≥9)=%d  CRITICAL=%d  HIGH=%d  MEDIUM=%d  LOW/UNK=%d",
+            sc["kev"], sc["critical_high_cvss"], sc["critical"],
+            sc["high"], sc["medium"], sc["low_unknown"],
+        )
 
-    # 7. Build report
-    report = build_report(
-        report_id=report_id,
-        window_start=window_start,
-        window_end=window_end,
-        vulnerabilities=unique_vulns,
-        threat_events=unique_events,
-        collection_window_hours=settings.collection_window_hours,
-    )
-    if _prior_preview:
-        report.linkedin_preview = _prior_preview
+        # Preserve linkedin_preview from any prior run before build_report resets it.
+        # load_report reads the file that was saved by the *previous* collect run;
+        # once save_report() runs below it will be overwritten with the new report.
+        _prior_preview = ""
+        if not dry_run:
+            _prior = load_report(report_id)
+            if _prior and _prior.linkedin_preview and "PLACEHOLDER" not in _prior.linkedin_preview:
+                _prior_preview = _prior.linkedin_preview
+                logger.info(
+                    "Carrying forward linkedin_preview from prior run (%d words)",
+                    len(_prior_preview.split()),
+                )
 
-    # 8. Persist
-    if not dry_run:
-        save_raw_collection(report_id, unique_vulns, unique_events)
-        report_path = save_report(report)
-        log_action(AuditAction.REPORT_GENERATED, report_id=report_id, detail=str(report_path))
-        logger.info("Report saved: %s", report_path)
-    else:
-        logger.info("DRY RUN — skipping storage writes")
+        # 7. Build report
+        report = build_report(
+            report_id=report_id,
+            window_start=window_start,
+            window_end=window_end,
+            vulnerabilities=unique_vulns,
+            threat_events=unique_events,
+            collection_window_hours=settings.collection_window_hours,
+        )
+        if _prior_preview:
+            report.linkedin_preview = _prior_preview
 
-    # 9. AI extraction + summarization
-    if not dry_run:
-        _run_ai_pipeline(report)
+        # 8. Persist
+        if not dry_run:
+            save_raw_collection(report_id, unique_vulns, unique_events)
+            report_path = save_report(report)
+            log_action(AuditAction.REPORT_GENERATED, report_id=report_id, detail=str(report_path))
+            logger.info("Report saved: %s", report_path)
+        else:
+            logger.info("DRY RUN — skipping storage writes")
 
-    log_action(AuditAction.COLLECTION_COMPLETED, report_id=report_id)
+        # 9. AI extraction + summarization
+        if not dry_run:
+            _run_ai_pipeline(report)
 
-    logger.info(
-        "=== Done | vulns=%d (critical=%d, kev=%d) | events=%d (breaches=%d, attacks=%d) ===",
-        len(unique_vulns), report.critical_cve_count, report.kev_count,
-        len(unique_events), report.breach_count, report.attack_count,
-    )
+        log_action(AuditAction.COLLECTION_COMPLETED, report_id=report_id)
 
-    # 10. Send approval email (unless skipped)
-    if not dry_run and not skip_email:
-        _send_email_for_report(report)
+        logger.info(
+            "=== Done | vulns=%d (critical=%d, kev=%d) | events=%d (breaches=%d, attacks=%d) ===",
+            len(unique_vulns), report.critical_cve_count, report.kev_count,
+            len(unique_events), report.breach_count, report.attack_count,
+        )
+
+        # 10. Send approval email (unless skipped)
+        if not dry_run and not skip_email:
+            _send_email_for_report(report)
+
+    finally:
+        _release_collect_lock(lock_path)
 
 
 # ── AI pipeline ──────────────────────────────────────────────────────────────

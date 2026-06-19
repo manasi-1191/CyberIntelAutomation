@@ -14,6 +14,7 @@ import logging
 from dataclasses import dataclass
 from email import message_from_bytes
 from email.message import Message
+from email.utils import parseaddr
 
 from emailer.gmail_auth import get_gmail_service
 from config.settings import settings
@@ -75,9 +76,43 @@ def check_for_reply(thread_id: str, sent_message_id: str) -> ApprovalPollResult:
 
 
 def _is_authorized_sender(from_header: str) -> bool:
-    """Accept replies only from the configured approval recipient address."""
+    """Accept replies only from the configured approval recipient address.
+
+    Uses email.utils.parseaddr to extract the actual address from the From
+    header so display names and angle-bracket formatting are handled correctly,
+    and lookalike domains (evil.io appended) cannot pass a substring check.
+    """
+    _, addr = parseaddr(from_header)
+    if not addr:
+        return False
     recipient = settings.approval_email_recipient.lower().strip()
-    return recipient in from_header.lower()
+    return addr.lower().strip() == recipient
+
+
+def _extract_decision_from_body(body: str) -> str | None:
+    """
+    Return 'approve' or 'reject' only when the first non-empty, non-quoted
+    line of the reply body is exactly a decision keyword (whole-word, not
+    substring).  Lines beginning with '>' are treated as quoted original-email
+    text and skipped.
+
+    Returns None if the first substantive line is not a recognised keyword,
+    preventing auto-replies such as "Your request has been approved for
+    processing" from triggering a publish.
+    """
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(">"):   # skip quoted lines from original email
+            continue
+        word = stripped.lower()
+        if word in _APPROVE_KEYWORDS:
+            return "approve"
+        if word in _REJECT_KEYWORDS:
+            return "reject"
+        return None   # first real line is not a decision keyword — ambiguous
+    return None
 
 
 def _parse_message(msg: dict, sender: str) -> ApprovalPollResult | None:
@@ -103,15 +138,12 @@ def _parse_message(msg: dict, sender: str) -> ApprovalPollResult | None:
             content=attachment_text.strip(),
         )
 
-    # Check body for APPROVE / REJECT keyword
-    body_lower = body.lower().strip()
-    first_word = body_lower.split()[0] if body_lower.split() else ""
-
-    if first_word in _APPROVE_KEYWORDS or any(k in body_lower[:100] for k in _APPROVE_KEYWORDS):
+    # Strict first-line keyword matching — no substring fallback
+    decision = _extract_decision_from_body(body)
+    if decision == "approve":
         logger.info("Approval reply: APPROVED by %s", sender)
         return ApprovalPollResult(status="approved", approved_by=sender)
-
-    if first_word in _REJECT_KEYWORDS or any(k in body_lower[:100] for k in _REJECT_KEYWORDS):
+    if decision == "reject":
         logger.info("Approval reply: REJECTED by %s", sender)
         return ApprovalPollResult(status="rejected", approved_by=sender)
 
