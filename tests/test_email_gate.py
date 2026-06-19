@@ -331,3 +331,92 @@ class TestLinkedInFallbackDescriptionTruncation:
             if "CVE-2026-9999" in line:
                 assert "..." not in line
                 break
+
+
+# ── 5. Deterministic fallback passes gate; build_report stubs are blocked ─────
+
+_BUILD_REPORT_PLACEHOLDER = (
+    "[PLACEHOLDER — Phase 4 will generate this via Anthropic] "
+    "Collected 1 vulnerabilities and 55 threat events."
+)
+
+
+class TestPlaceholderGating:
+    """
+    The build_report() defaults produce PLACEHOLDER stubs in executive_summary
+    and detailed_summary.  When Phase 3B fails (e.g. Gemini quota), those stubs
+    stay in the report.  The email gate must block them, and the LinkedIn
+    fallback must not embed them.
+    """
+
+    def test_build_report_placeholder_in_executive_blocks_gate(self):
+        from main import _report_ready_for_email
+        report = _full_report(executive_summary=_BUILD_REPORT_PLACEHOLDER)
+        ready, reason = _report_ready_for_email(report)
+        assert not ready
+        assert "executive_summary" in reason
+        assert "PLACEHOLDER" in reason
+
+    def test_build_report_placeholder_in_detailed_blocks_gate(self):
+        from main import _report_ready_for_email
+        report = _full_report(detailed_summary=_BUILD_REPORT_PLACEHOLDER)
+        ready, reason = _report_ready_for_email(report)
+        assert not ready
+        assert "detailed_summary" in reason
+        assert "PLACEHOLDER" in reason
+
+    def test_build_report_placeholder_in_linkedin_preview_blocks_gate(self):
+        from main import _report_ready_for_email
+        report = _full_report(
+            linkedin_preview=(
+                "1 actively exploited vulnerability this week — patch now.\n\n"
+                + _BUILD_REPORT_PLACEHOLDER
+            )
+        )
+        ready, reason = _report_ready_for_email(report)
+        assert not ready
+        assert "linkedin_preview" in reason
+        assert "PLACEHOLDER" in reason
+
+    def test_linkedin_fallback_skips_placeholder_detailed_summary(self):
+        """
+        When detailed_summary is a build_report placeholder stub,
+        _build_fallback_linkedin_preview must NOT embed it — it should
+        fall through to the synthesised-from-counts path.
+        """
+        from summarizer.summarizer import _build_fallback_linkedin_preview
+        report = _full_report(detailed_summary=_BUILD_REPORT_PLACEHOLDER)
+        result = _build_fallback_linkedin_preview(report, [])
+        assert "PLACEHOLDER" not in result
+
+    def test_deterministic_linkedin_fallback_passes_email_gate(self):
+        """
+        A report with real executive/detailed summaries and a deterministic
+        LinkedIn fallback (no AI) must pass _report_ready_for_email.
+        """
+        from main import _report_ready_for_email
+        from summarizer.summarizer import _build_fallback_linkedin_preview
+
+        # Report has real AI-generated summaries but no LinkedIn preview yet
+        report = _full_report(
+            executive_summary="One critical actively-exploited CVE threatens enterprise systems.",
+            detailed_summary=(
+                "CVE-2026-1111 is actively exploited in the wild. "
+                "Security teams should apply vendor patches immediately."
+            ),
+            linkedin_preview="",  # not yet generated
+        )
+
+        # Generate the deterministic fallback
+        fallback = _build_fallback_linkedin_preview(report, [])
+        assert fallback, "fallback must be non-empty for this report"
+        assert "PLACEHOLDER" not in fallback, "fallback must not contain PLACEHOLDER"
+
+        # Apply it and check the gate
+        report = _full_report(
+            executive_summary=report.executive_summary,
+            detailed_summary=report.detailed_summary,
+            linkedin_preview=fallback,
+        )
+        ready, reason = _report_ready_for_email(report)
+        assert ready, f"deterministic fallback should pass gate but was blocked: {reason}"

@@ -345,8 +345,9 @@ def _build_fallback_linkedin_preview(report: DailyReport, extracted: list) -> st
     else:
         hook = f"Cyber attack activity up — {report.attack_count} incident(s) in the last 48 hours."
 
-    # 2. Summary paragraph (first two sentences of detailed_summary, or synthesised)
-    if report.detailed_summary:
+    # 2. Summary paragraph — use detailed_summary only when it contains real AI/fallback
+    # content, not the build_report placeholder stub.
+    if report.detailed_summary and "PLACEHOLDER" not in report.detailed_summary:
         sentences = re.split(r'(?<=[.!?])\s+', report.detailed_summary.strip())
         summary = " ".join(sentences[:2])
     else:

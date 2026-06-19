@@ -288,12 +288,17 @@ def cmd_send_email(args: argparse.Namespace) -> None:
 def _report_ready_for_email(report: DailyReport) -> tuple[bool, str]:
     """
     Returns (ready, reason).  True only when all three content fields are
-    populated and linkedin_preview is free of PLACEHOLDER markers.
+    populated with real content — empty strings and build_report placeholder
+    stubs (containing the literal word PLACEHOLDER) are both rejected.
     """
     if not report.executive_summary:
         return False, "executive_summary is empty"
+    if "PLACEHOLDER" in report.executive_summary:
+        return False, "executive_summary contains PLACEHOLDER"
     if not report.detailed_summary:
         return False, "detailed_summary is empty"
+    if "PLACEHOLDER" in report.detailed_summary:
+        return False, "detailed_summary contains PLACEHOLDER"
     if not report.linkedin_preview or not report.linkedin_preview.strip():
         return False, "linkedin_preview is empty"
     if "PLACEHOLDER" in report.linkedin_preview:

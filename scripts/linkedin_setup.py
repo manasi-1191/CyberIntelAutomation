@@ -238,8 +238,11 @@ def _verify() -> None:
         )
         if resp.status_code == 200:
             data = resp.json()
+            sub = data.get("sub", "")
+            urn = f"urn:li:person:{sub}" if sub else "(not returned)"
             print(f"  Connected as : {data.get('name', '(unknown)')}")
             print(f"  Email        : {data.get('email', '(not in scope)')}")
+            print(f"  Author URN   : {urn}")
             print()
             print("LinkedIn credentials are working.")
         elif resp.status_code == 401:
@@ -274,17 +277,18 @@ def _whoami() -> None:
 
     try:
         resp = httpx.get(
-            _ME_URL,
-            headers={
-                "Authorization": f"Bearer {settings.linkedin_access_token}",
-                "X-Restli-Protocol-Version": "2.0.0",
-            },
+            _USERINFO_URL,
+            headers={"Authorization": f"Bearer {settings.linkedin_access_token}"},
             timeout=15.0,
         )
         if resp.status_code == 200:
             data = resp.json()
-            person_id = data.get("id", "")
-            urn = f"urn:li:person:{person_id}"
+            sub = data.get("sub", "")
+            if not sub:
+                print("  ERROR: 'sub' field missing from /v2/userinfo response.")
+                print("  Try re-running the OAuth flow: python scripts/linkedin_setup.py")
+                sys.exit(1)
+            urn = f"urn:li:person:{sub}"
             print()
             print(f"  Your LinkedIn URN: {urn}")
             print()
