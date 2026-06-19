@@ -52,8 +52,10 @@ pip install -r requirements.txt
 ### 2. Configure credentials
 
 ```bash
-cp .env.example .env   # or edit .env directly
+cp .env.example .env
 ```
+
+Fill in your credentials in `.env`. See [CLIENT_HANDOFF.md](CLIENT_HANDOFF.md) for a step-by-step walkthrough of every field.
 
 Set these in `.env`:
 
@@ -119,6 +121,7 @@ python main.py check-approval --report-id 2026-06-15
 
 ## Setup guides
 
+- [**Client handoff — full setup walkthrough**](CLIENT_HANDOFF.md)
 - [LinkedIn credentials and OAuth flow](LINKEDIN_SETUP.md)
 - [Automatic scheduling and crontab](docs/SCHEDULING.md)
 
@@ -127,6 +130,7 @@ python main.py check-approval --report-id 2026-06-15
 ## Safeguards
 
 - **Email gate**: LinkedIn is never posted without an APPROVE reply.
+- **Content gate**: Approval email is blocked if AI summaries or LinkedIn preview are missing or contain placeholder text. Re-run `python main.py summarize --report-id <date>` after quota resets.
 - **No double-posting**: Once `linkedin_post_id` is set on a report, all subsequent runs skip it.
 - **Manual fallback**: If LinkedIn publishing fails, content is saved to `data/reports/{id}_linkedin_manual.txt` for copy-paste.
 - **TEST_MODE**: Set `TEST_MODE=true` to run the full pipeline without touching LinkedIn.
