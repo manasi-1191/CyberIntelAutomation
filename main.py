@@ -357,6 +357,52 @@ def _report_ready_for_email(report: DailyReport) -> tuple[bool, str]:
     return True, ""
 
 
+def _send_content_gate_notification(report: DailyReport, reason: str) -> None:
+    """
+    Send a one-time failure notification email when the content gate blocks
+    the approval email.  Sets report.content_gate_notified=True and saves the
+    report so repeated collect/watcher runs do not re-send the notification.
+    """
+    if report.content_gate_notified:
+        logger.info(
+            "Content gate notification already sent for report %s — skipping repeat",
+            report.report_id,
+        )
+        return
+
+    from emailer.gmail_auth import is_configured
+    from emailer.sender import send_failure_notification
+
+    if not is_configured():
+        logger.warning(
+            "Gmail not configured — cannot send content gate notification for report %s",
+            report.report_id,
+        )
+        return
+
+    try:
+        send_failure_notification(report, reason)
+        report.content_gate_notified = True
+        save_report(report)
+        log_action(
+            AuditAction.CONTENT_GATE_NOTIFICATION_SENT,
+            report_id=report.report_id,
+            detail=f"notified recipient of blocked field: {reason}",
+        )
+    except Exception as exc:
+        logger.error(
+            "Failed to send content gate notification for report %s: %s",
+            report.report_id, exc,
+        )
+        log_action(
+            AuditAction.ERROR,
+            report_id=report.report_id,
+            source="emailer",
+            success=False,
+            error_message=f"content gate notification failed: {exc}",
+        )
+
+
 def _send_email_for_report(report: DailyReport) -> None:
     ready, reason = _report_ready_for_email(report)
     if not ready:
@@ -373,6 +419,7 @@ def _send_email_for_report(report: DailyReport) -> None:
             success=False,
             error_message=reason,
         )
+        _send_content_gate_notification(report, reason)
         return
 
     from emailer.gmail_auth import is_configured, GmailCredentialsError
@@ -575,9 +622,14 @@ def _publish_or_simulate(report: DailyReport) -> None:
 
 
 def _publish_to_linkedin(report: DailyReport) -> None:
-    """Publish approved content to LinkedIn. Falls back to manual file on any failure."""
-    from linkedin.auth import is_configured as linkedin_is_configured
-    from linkedin.publisher import publish_post
+    """Publish approved content to LinkedIn. Falls back to manual file on any failure.
+
+    On 401 Unauthorized, attempts a one-shot token refresh via try_refresh_token()
+    and retries exactly once.  The duplicate-post guard (linkedin_post_id) prevents
+    double-posting even if both the original attempt and the retry somehow succeed.
+    """
+    from linkedin.auth import is_configured as linkedin_is_configured, try_refresh_token
+    from linkedin.publisher import publish_post, LinkedInAuthError
 
     if report.linkedin_post_id:
         logger.info(
@@ -594,12 +646,51 @@ def _publish_to_linkedin(report: DailyReport) -> None:
         _save_for_manual_posting(report)
         return
 
-    try:
-        post_id = publish_post(
+    def _attempt() -> str | None:
+        return publish_post(
             content=report.published_content,
             author_urn=settings.linkedin_author_urn,
             report_id=report.report_id,
         )
+
+    try:
+        post_id = _attempt()
+    except LinkedInAuthError:
+        logger.warning(
+            "LinkedIn returned 401 — access token may have expired. "
+            "Attempting automatic token refresh..."
+        )
+        new_token = try_refresh_token()
+        if not new_token:
+            logger.error(
+                "LinkedIn token refresh failed. "
+                "Run: python scripts/linkedin_setup.py --refresh  to re-authenticate."
+            )
+            log_action(
+                AuditAction.LINKEDIN_PUBLISH_FAILED,
+                report_id=report.report_id,
+                success=False,
+                error_message="401 Unauthorized — token refresh failed",
+            )
+            _save_for_manual_posting(report)
+            return
+        settings.linkedin_access_token = new_token
+        logger.info("LinkedIn token refreshed — retrying publish once")
+        try:
+            post_id = _attempt()
+        except LinkedInAuthError:
+            logger.error(
+                "LinkedIn still returns 401 after token refresh. "
+                "Manual re-authentication required: python scripts/linkedin_setup.py --refresh"
+            )
+            log_action(
+                AuditAction.LINKEDIN_PUBLISH_FAILED,
+                report_id=report.report_id,
+                success=False,
+                error_message="401 Unauthorized after token refresh — manual re-auth required",
+            )
+            _save_for_manual_posting(report)
+            return
     except ValueError as exc:
         logger.error("LinkedIn publish validation error: %s", exc)
         _save_for_manual_posting(report)

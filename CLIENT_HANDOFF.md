@@ -250,12 +250,18 @@ python main.py check-approval --report-id 2026-06-19
 
 **LinkedIn post not publishing**
 - Check `logs/approval_watcher.log` for the error.
-- LinkedIn access tokens expire after ~60 days. Re-run `python scripts/linkedin_setup.py` to refresh.
-- Confirm `LINKEDIN_AUTHOR_URN` matches your account.
+- LinkedIn access tokens expire after approximately 60 days. When a token expires:
+  1. The pipeline detects the 401 error automatically and attempts a one-shot token refresh.
+  2. If the refresh succeeds, the post is published without any action from you.
+  3. If the refresh fails (e.g. the refresh token itself has also expired), the post content is saved to `data/reports/<date>_linkedin_manual.txt` for copy-paste, and you will see an error in `logs/approval_watcher.log`.
+  4. To re-authenticate: `python scripts/linkedin_setup.py --refresh`
+- Confirm `LINKEDIN_AUTHOR_URN` matches your account (`python scripts/linkedin_setup.py --whoami`).
 
-**"Approval email blocked"**
-- This means one or more content fields (executive summary, detailed summary, LinkedIn preview) were not generated. Check the AI quota and re-run:
+**"Approval email blocked" / briefing generation failed email**
+- If one or more AI-generated content fields (executive summary, detailed summary, LinkedIn preview) could not be generated, the approval email is held and you will receive a separate **"Briefing generation failed"** notification email.
+- The notification explains which field failed and gives the exact commands to retry once quota or API issues are resolved:
   ```bash
   python main.py summarize --report-id <date>
   python main.py send-email --report-id <date>
   ```
+- You will only receive one notification per report — repeated pipeline runs do not spam your inbox.

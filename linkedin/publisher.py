@@ -22,6 +22,14 @@ logger = logging.getLogger(__name__)
 
 _UGC_POSTS_URL = "https://api.linkedin.com/v2/ugcPosts"
 
+
+class LinkedInAuthError(Exception):
+    """Raised by publish_post when LinkedIn returns 401 Unauthorized.
+
+    Signals that the access token has expired.  The caller should attempt a
+    one-shot token refresh via linkedin.auth.try_refresh_token() and retry.
+    """
+
 CONTENT_MAX_CHARS = 3000  # LinkedIn text-post character limit
 
 _AUTHOR_URN_RE = re.compile(r"^urn:li:(person|organization):\w+$")
@@ -109,10 +117,10 @@ def _prepare_content(content: str) -> str:
 def _handle_error_response(resp: httpx.Response) -> None:
     status = resp.status_code
     if status == 401:
-        logger.error(
-            "LinkedIn token expired (401). "
-            "Refresh it with: python scripts/linkedin_setup.py --refresh"
+        logger.warning(
+            "LinkedIn token expired (401) — caller will attempt automatic refresh"
         )
+        raise LinkedInAuthError("401 Unauthorized — access token expired")
     elif status == 403:
         logger.error(
             "LinkedIn permission denied (403). Possible causes:\n"

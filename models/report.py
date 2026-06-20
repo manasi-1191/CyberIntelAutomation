@@ -63,4 +63,8 @@ class DailyReport(BaseModel):
     # In TEST_MODE this path holds the approved content instead of publishing to LinkedIn
     test_output_path: str = ""
 
+    # Set to True after a content-gate failure notification has been sent so
+    # repeated collect/watcher runs do not spam the client inbox.
+    content_gate_notified: bool = False
+
     model_config = ConfigDict(use_enum_values=True)

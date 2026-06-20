@@ -23,6 +23,7 @@ class AuditAction(str, Enum):
     LINKEDIN_PUBLISH_FAILED = "linkedin_publish_failed"
     LINKEDIN_SKIPPED_TEST_MODE = "linkedin_skipped_test_mode"
     CONTENT_SAVED_TEST_MODE = "content_saved_test_mode"
+    CONTENT_GATE_NOTIFICATION_SENT = "content_gate_notification_sent"
     ERROR = "error"
 
 

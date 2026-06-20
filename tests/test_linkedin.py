@@ -125,14 +125,15 @@ class TestPublishSuccess:
 # ── Publisher: error handling ─────────────────────────────────────────────────
 
 class TestPublishErrors:
-    def test_returns_none_on_401(self):
+    def test_raises_linked_in_auth_error_on_401(self):
+        from linkedin.publisher import LinkedInAuthError
         mock_s = _prod_settings()
         with respx.mock:
             respx.post(_POST_URL).mock(return_value=httpx.Response(401, text="Unauthorized"))
             with patch("linkedin.publisher.settings", mock_s), \
                  patch("linkedin.auth.settings", mock_s):
-                result = publish_post("Content.", _VALID_URN)
-        assert result is None
+                with pytest.raises(LinkedInAuthError):
+                    publish_post("Content.", _VALID_URN)
 
     def test_returns_none_on_403(self):
         mock_s = _prod_settings()
@@ -386,3 +387,113 @@ class TestDuplicatePublishGuards:
 
         mock_poll.assert_not_called()
         mock_publish.assert_not_called()
+
+
+# ── LinkedIn token refresh on 401 ────────────────────────────────────────────
+
+class TestLinkedInTokenRefreshOnExpiry:
+    """
+    _publish_to_linkedin: on 401 LinkedInAuthError, attempt one-shot token
+    refresh via try_refresh_token() and retry publish exactly once.
+    """
+
+    def _report(self) -> DailyReport:
+        return _make_report(published_content="Today's threat briefing.")
+
+    def test_401_triggers_refresh(self):
+        from linkedin.publisher import LinkedInAuthError
+        report = self._report()
+
+        with patch("linkedin.auth.is_configured", return_value=True), \
+             patch("linkedin.publisher.publish_post", side_effect=LinkedInAuthError("401")), \
+             patch("linkedin.auth.try_refresh_token", return_value=None) as mock_refresh, \
+             patch("main.settings") as mock_s, \
+             patch("main.save_report"), \
+             patch("main.log_action"), \
+             patch("main._save_for_manual_posting"):
+            mock_s.linkedin_author_urn = _VALID_URN
+            _publish_to_linkedin(report)
+
+        mock_refresh.assert_called_once()
+
+    def test_successful_refresh_retries_and_publishes(self):
+        from linkedin.publisher import LinkedInAuthError
+        report = self._report()
+        call_count = [0]
+
+        def fake_publish(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise LinkedInAuthError("401")
+            return "urn:li:ugcPost:99999"
+
+        with patch("linkedin.auth.is_configured", return_value=True), \
+             patch("linkedin.publisher.publish_post", side_effect=fake_publish), \
+             patch("linkedin.auth.try_refresh_token", return_value="new-access-token"), \
+             patch("main.settings") as mock_s, \
+             patch("main.save_report"), \
+             patch("main.log_action"):
+            mock_s.linkedin_author_urn = _VALID_URN
+            _publish_to_linkedin(report)
+
+        assert call_count[0] == 2
+        assert report.linkedin_post_id == "urn:li:ugcPost:99999"
+
+    def test_failed_refresh_saves_manual_and_does_not_retry(self):
+        from linkedin.publisher import LinkedInAuthError
+        report = self._report()
+        publish_calls = [0]
+
+        def fake_publish(*args, **kwargs):
+            publish_calls[0] += 1
+            raise LinkedInAuthError("401")
+
+        with patch("linkedin.auth.is_configured", return_value=True), \
+             patch("linkedin.publisher.publish_post", side_effect=fake_publish), \
+             patch("linkedin.auth.try_refresh_token", return_value=None), \
+             patch("main.settings") as mock_s, \
+             patch("main.save_report"), \
+             patch("main.log_action"), \
+             patch("main._save_for_manual_posting") as mock_manual:
+            mock_s.linkedin_author_urn = _VALID_URN
+            _publish_to_linkedin(report)
+
+        assert publish_calls[0] == 1
+        mock_manual.assert_called_once()
+
+    def test_non_401_error_does_not_trigger_refresh(self):
+        report = self._report()
+
+        with patch("linkedin.auth.is_configured", return_value=True), \
+             patch("linkedin.publisher.publish_post", side_effect=ValueError("bad urn")), \
+             patch("linkedin.auth.try_refresh_token") as mock_refresh, \
+             patch("main.settings") as mock_s, \
+             patch("main.save_report"), \
+             patch("main.log_action"), \
+             patch("main._save_for_manual_posting"):
+            mock_s.linkedin_author_urn = _VALID_URN
+            _publish_to_linkedin(report)
+
+        mock_refresh.assert_not_called()
+
+    def test_no_infinite_retry_on_persistent_401(self):
+        from linkedin.publisher import LinkedInAuthError
+        report = self._report()
+        publish_calls = [0]
+
+        def fake_publish(*args, **kwargs):
+            publish_calls[0] += 1
+            raise LinkedInAuthError("401")
+
+        with patch("linkedin.auth.is_configured", return_value=True), \
+             patch("linkedin.publisher.publish_post", side_effect=fake_publish), \
+             patch("linkedin.auth.try_refresh_token", return_value="new-token"), \
+             patch("main.settings") as mock_s, \
+             patch("main.save_report"), \
+             patch("main.log_action"), \
+             patch("main._save_for_manual_posting") as mock_manual:
+            mock_s.linkedin_author_urn = _VALID_URN
+            _publish_to_linkedin(report)
+
+        assert publish_calls[0] == 2   # original + exactly one retry
+        mock_manual.assert_called_once()

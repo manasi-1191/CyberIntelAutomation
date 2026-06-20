@@ -420,3 +420,82 @@ class TestPlaceholderGating:
         )
         ready, reason = _report_ready_for_email(report)
         assert ready, f"deterministic fallback should pass gate but was blocked: {reason}"
+
+
+# ── 6. Content gate failure notification ──────────────────────────────────────
+
+class TestContentGateNotification:
+    """
+    When _send_email_for_report is blocked by the content gate it must send
+    a one-time failure notification email to the approval recipient.
+    Subsequent blocked calls on the same report (content_gate_notified=True)
+    must not re-send.
+    """
+
+    def _blocked_report(self, **kwargs) -> DailyReport:
+        defaults = dict(
+            report_id="2026-06-19",
+            window_start=WIN_START,
+            window_end=NOW,
+            executive_summary="Critical CVE under active exploitation.",
+            detailed_summary="",          # triggers gate
+            linkedin_preview="Critical CVE threatening enterprise networks. #CyberSecurity",
+        )
+        defaults.update(kwargs)
+        return DailyReport(**defaults)
+
+    def test_blocked_approval_sends_failure_notification(self):
+        from main import _send_email_for_report
+        report = self._blocked_report()
+
+        with patch("emailer.gmail_auth.is_configured", return_value=True), \
+             patch("emailer.sender.send_failure_notification") as mock_notify, \
+             patch("main.save_report"), \
+             patch("main.log_action"):
+            _send_email_for_report(report)
+
+        mock_notify.assert_called_once()
+
+    def test_normal_approval_email_not_sent_when_content_incomplete(self):
+        from main import _send_email_for_report
+        report = self._blocked_report()
+
+        with patch("emailer.gmail_auth.is_configured", return_value=True), \
+             patch("emailer.sender.send_failure_notification"), \
+             patch("emailer.sender.send_approval_email") as mock_approval, \
+             patch("main.save_report"), \
+             patch("main.log_action"):
+            _send_email_for_report(report)
+
+        mock_approval.assert_not_called()
+
+    def test_no_notification_spam_when_already_notified(self):
+        from main import _send_email_for_report
+        report = self._blocked_report(content_gate_notified=True)
+
+        with patch("emailer.gmail_auth.is_configured", return_value=True), \
+             patch("emailer.sender.send_failure_notification") as mock_notify, \
+             patch("main.save_report"), \
+             patch("main.log_action"):
+            _send_email_for_report(report)
+
+        mock_notify.assert_not_called()
+
+    def test_notification_includes_report_id_and_failed_field(self):
+        from main import _send_email_for_report
+        report = self._blocked_report()
+        captured = []
+
+        def fake_notify(r, reason):
+            captured.append((r.report_id, reason))
+
+        with patch("emailer.gmail_auth.is_configured", return_value=True), \
+             patch("emailer.sender.send_failure_notification", side_effect=fake_notify), \
+             patch("main.save_report"), \
+             patch("main.log_action"):
+            _send_email_for_report(report)
+
+        assert len(captured) == 1
+        report_id, reason = captured[0]
+        assert report_id == "2026-06-19"
+        assert "detailed_summary" in reason
