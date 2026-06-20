@@ -66,5 +66,7 @@ class DailyReport(BaseModel):
     # Set to True after a content-gate failure notification has been sent so
     # repeated collect/watcher runs do not spam the client inbox.
     content_gate_notified: bool = False
+    # The failure reason last notified; empty means not yet notified.
+    content_gate_notified_reason: str = ""
 
     model_config = ConfigDict(use_enum_values=True)

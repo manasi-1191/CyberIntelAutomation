@@ -471,7 +471,10 @@ class TestContentGateNotification:
 
     def test_no_notification_spam_when_already_notified(self):
         from main import _send_email_for_report
-        report = self._blocked_report(content_gate_notified=True)
+        report = self._blocked_report(
+            content_gate_notified=True,
+            content_gate_notified_reason="detailed_summary is empty",
+        )
 
         with patch("emailer.gmail_auth.is_configured", return_value=True), \
              patch("emailer.sender.send_failure_notification") as mock_notify, \
@@ -499,3 +502,108 @@ class TestContentGateNotification:
         report_id, reason = captured[0]
         assert report_id == "2026-06-19"
         assert "detailed_summary" in reason
+
+
+# ── 7. Content gate deduplication (Bug 2) ────────────────────────────────────
+
+class TestContentGateDeduplication:
+    """
+    Failure notification must be deduplicated by (report_id, reason).
+
+    - Same reason blocked again  → no second email
+    - Different reason           → new email IS sent
+    - AI pipeline itself         → never calls _send_content_gate_notification
+    - Successful approval email  → resets content_gate_notified so future
+                                   independent failures can notify fresh
+    - Reason is persisted        → readable from report after notification
+    """
+
+    def _blocked_report(self, **kwargs) -> DailyReport:
+        defaults = dict(
+            report_id="2026-06-19",
+            window_start=WIN_START,
+            window_end=NOW,
+            executive_summary="Critical CVE under active exploitation.",
+            detailed_summary="",          # triggers gate — reason: "detailed_summary is empty"
+            linkedin_preview="Critical CVE threatening enterprise networks. #CyberSecurity",
+        )
+        defaults.update(kwargs)
+        return DailyReport(**defaults)
+
+    # ── 1. Same failure reason on a second run → one notification total ───────
+
+    def test_same_reason_does_not_resend_notification(self):
+        from main import _send_content_gate_notification
+        report = self._blocked_report(
+            content_gate_notified=True,
+            content_gate_notified_reason="detailed_summary is empty",
+        )
+        with patch("emailer.gmail_auth.is_configured", return_value=True), \
+             patch("emailer.sender.send_failure_notification") as mock_notify, \
+             patch("main.save_report"), \
+             patch("main.log_action"):
+            _send_content_gate_notification(report, "detailed_summary is empty")
+        mock_notify.assert_not_called()
+
+    # ── 2. Different reason → fresh notification IS sent ─────────────────────
+
+    def test_different_reason_sends_new_notification(self):
+        from main import _send_content_gate_notification
+        report = self._blocked_report(
+            content_gate_notified=True,
+            content_gate_notified_reason="detailed_summary is empty",  # prior reason
+        )
+        with patch("emailer.gmail_auth.is_configured", return_value=True), \
+             patch("emailer.sender.send_failure_notification") as mock_notify, \
+             patch("main.save_report"), \
+             patch("main.log_action"):
+            # A new failure reason (a different field now missing)
+            _send_content_gate_notification(report, "linkedin_preview is empty")
+        mock_notify.assert_called_once()
+
+    # ── 3. AI pipeline never triggers the notification ────────────────────────
+
+    def test_ai_pipeline_does_not_send_notification(self):
+        """_run_ai_pipeline must not call _send_content_gate_notification."""
+        from main import _run_ai_pipeline
+        report = DailyReport(
+            report_id="2026-06-19",
+            window_start=WIN_START,
+            window_end=NOW,
+        )
+        with patch("summarizer.ai_provider.get_ai_client", return_value=None), \
+             patch("main._send_content_gate_notification") as mock_notify, \
+             patch("main.save_report"), \
+             patch("main.log_action"):
+            _run_ai_pipeline(report)
+        mock_notify.assert_not_called()
+
+    # ── 4. Successful approval email resets the notification state ────────────
+
+    def test_successful_approval_email_resets_notification_state(self):
+        report = _full_report()
+        report.content_gate_notified = True
+        report.content_gate_notified_reason = "linkedin_preview is empty"
+
+        from main import _send_email_for_report
+        with patch("emailer.gmail_auth.is_configured", return_value=True), \
+             patch("emailer.sender.send_approval_email", return_value=("tid", "mid")), \
+             patch("main.save_report"), \
+             patch("main.log_action"):
+            _send_email_for_report(report)
+
+        assert report.content_gate_notified is False
+        assert report.content_gate_notified_reason == ""
+
+    # ── 5. Failure reason is stored on the report after first notification ────
+
+    def test_notification_reason_stored_on_report(self):
+        report = self._blocked_report()  # detailed_summary="" → reason = "detailed_summary is empty"
+        from main import _send_email_for_report
+        with patch("emailer.gmail_auth.is_configured", return_value=True), \
+             patch("emailer.sender.send_failure_notification"), \
+             patch("main.save_report"), \
+             patch("main.log_action"):
+            _send_email_for_report(report)
+        assert report.content_gate_notified is True
+        assert report.content_gate_notified_reason == "detailed_summary is empty"

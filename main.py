@@ -172,18 +172,28 @@ def cmd_collect(args: argparse.Namespace) -> None:
             sc["high"], sc["medium"], sc["low_unknown"],
         )
 
-        # Preserve linkedin_preview from any prior run before build_report resets it.
+        # Preserve select fields from any prior run before build_report resets them.
         # load_report reads the file that was saved by the *previous* collect run;
         # once save_report() runs below it will be overwritten with the new report.
         _prior_preview = ""
+        _prior_notified = False
+        _prior_notified_reason = ""
         if not dry_run:
             _prior = load_report(report_id)
-            if _prior and _prior.linkedin_preview and "PLACEHOLDER" not in _prior.linkedin_preview:
-                _prior_preview = _prior.linkedin_preview
-                logger.info(
-                    "Carrying forward linkedin_preview from prior run (%d words)",
-                    len(_prior_preview.split()),
-                )
+            if _prior:
+                if _prior.linkedin_preview and "PLACEHOLDER" not in _prior.linkedin_preview:
+                    _prior_preview = _prior.linkedin_preview
+                    logger.info(
+                        "Carrying forward linkedin_preview from prior run (%d words)",
+                        len(_prior_preview.split()),
+                    )
+                if _prior.content_gate_notified:
+                    _prior_notified = True
+                    _prior_notified_reason = _prior.content_gate_notified_reason
+                    logger.info(
+                        "Carrying forward content_gate_notified=True (reason=%r) from prior run",
+                        _prior_notified_reason,
+                    )
 
         # 7. Build report
         report = build_report(
@@ -196,6 +206,9 @@ def cmd_collect(args: argparse.Namespace) -> None:
         )
         if _prior_preview:
             report.linkedin_preview = _prior_preview
+        if _prior_notified:
+            report.content_gate_notified = True
+            report.content_gate_notified_reason = _prior_notified_reason
 
         # 8. Persist
         if not dry_run:
@@ -360,13 +373,21 @@ def _report_ready_for_email(report: DailyReport) -> tuple[bool, str]:
 def _send_content_gate_notification(report: DailyReport, reason: str) -> None:
     """
     Send a one-time failure notification email when the content gate blocks
-    the approval email.  Sets report.content_gate_notified=True and saves the
-    report so repeated collect/watcher runs do not re-send the notification.
+    the approval email.  Sets report.content_gate_notified=True and stores the
+    reason so that repeated collect runs do not re-send for the *same* failure.
+
+    A different failure reason (e.g. a second field now failing after the first
+    was fixed) will trigger a fresh notification.
     """
-    if report.content_gate_notified:
+    # Skip only if already notified for this exact reason.
+    # An empty stored reason (legacy / old-style flag) also means "skip all."
+    if report.content_gate_notified and (
+        not report.content_gate_notified_reason
+        or report.content_gate_notified_reason == reason
+    ):
         logger.info(
-            "Content gate notification already sent for report %s — skipping repeat",
-            report.report_id,
+            "Content gate notification already sent for report %s (reason: %r) — skipping repeat",
+            report.report_id, reason,
         )
         return
 
@@ -383,6 +404,7 @@ def _send_content_gate_notification(report: DailyReport, reason: str) -> None:
     try:
         send_failure_notification(report, reason)
         report.content_gate_notified = True
+        report.content_gate_notified_reason = reason
         save_report(report)
         log_action(
             AuditAction.CONTENT_GATE_NOTIFICATION_SENT,
@@ -442,6 +464,10 @@ def _send_email_for_report(report: DailyReport) -> None:
         report.email_sent_at = datetime.utcnow()
         report.gmail_thread_id = thread_id
         report.gmail_message_id = message_id
+        # Approval email sent — clear notification state so future independent
+        # failures on this report (if any) can notify fresh.
+        report.content_gate_notified = False
+        report.content_gate_notified_reason = ""
         save_report(report)
         log_action(
             AuditAction.EMAIL_SENT,

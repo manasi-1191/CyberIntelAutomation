@@ -12,8 +12,6 @@ Security: only accepts replies from the configured APPROVAL_EMAIL_RECIPIENT addr
 import base64
 import logging
 from dataclasses import dataclass
-from email import message_from_bytes
-from email.message import Message
 from email.utils import parseaddr
 
 from emailer.gmail_auth import get_gmail_service
@@ -34,8 +32,11 @@ class ApprovalPollResult:
 
 def check_for_reply(thread_id: str, sent_message_id: str) -> ApprovalPollResult:
     """
-    Check the Gmail thread for a reply to our sent approval email.
-    Returns ApprovalPollResult describing what was found.
+    Scan the entire Gmail thread for approval replies.
+
+    All messages from the authorised sender are examined; the *newest* valid
+    decision (keyword body or .txt attachment) wins.  This ensures a corrective
+    reply always supersedes an earlier invalid one.
     """
     if not thread_id:
         logger.warning("No thread_id — cannot poll for approval")
@@ -57,6 +58,7 @@ def check_for_reply(thread_id: str, sent_message_id: str) -> ApprovalPollResult:
     messages = thread.get("messages", [])
     logger.debug("Thread %s has %d message(s)", thread_id, len(messages))
 
+    last_valid: ApprovalPollResult | None = None
     for msg in messages:
         # Skip the original message we sent
         if msg.get("id") == sent_message_id:
@@ -68,10 +70,12 @@ def check_for_reply(thread_id: str, sent_message_id: str) -> ApprovalPollResult:
             logger.debug("Skipping message from unauthorized sender: %s", sender)
             continue
 
-        result = _parse_message(msg, sender)
+        result = _parse_message(service, msg, sender)
         if result:
-            return result
+            last_valid = result  # keep scanning — we want the newest valid decision
 
+    if last_valid:
+        return last_valid
     return ApprovalPollResult(status="pending")
 
 
@@ -115,30 +119,36 @@ def _extract_decision_from_body(body: str) -> str | None:
     return None
 
 
-def _parse_message(msg: dict, sender: str) -> ApprovalPollResult | None:
+def _parse_message(service, msg: dict, sender: str) -> ApprovalPollResult | None:
     """
-    Extract body and attachments from a Gmail message dict.
+    Inspect a Gmail message dict directly from the API payload.
+
     Returns an ApprovalPollResult if the message contains a clear decision,
-    or None if it's ambiguous (e.g. auto-reply, OOO).
+    or None if it is ambiguous (e.g. auto-reply, OOO, invalid attachment type).
+
+    A .txt attachment takes priority over body keywords.
     """
-    mime_bytes = _decode_raw_message(msg)
-    if not mime_bytes:
-        return None
+    payload = msg.get("payload", {})
+    msg_id = msg.get("id", "")
 
-    mime = message_from_bytes(mime_bytes)
-    body = _extract_body(mime)
-    attachment_text = _extract_txt_attachment(mime)
+    # Log all attachment filenames found for debugging
+    _log_attachment_filenames(payload)
 
-    # Attachment takes priority over body keyword
-    if attachment_text:
-        logger.info("Approval reply contains .txt attachment — using edited content")
+    # .txt attachment takes priority over body keyword
+    txt_content = _fetch_txt_attachment(service, msg_id, payload)
+    if txt_content is not None:
+        logger.info(
+            "Approval reply (msg=%s) contains .txt attachment — using edited content",
+            msg_id,
+        )
         return ApprovalPollResult(
             status="edited_approved",
             approved_by=sender,
-            content=attachment_text.strip(),
+            content=txt_content.strip(),
         )
 
     # Strict first-line keyword matching — no substring fallback
+    body = _extract_body_from_payload(payload)
     decision = _extract_decision_from_body(body)
     if decision == "approve":
         logger.info("Approval reply: APPROVED by %s", sender)
@@ -147,80 +157,106 @@ def _parse_message(msg: dict, sender: str) -> ApprovalPollResult | None:
         logger.info("Approval reply: REJECTED by %s", sender)
         return ApprovalPollResult(status="rejected", approved_by=sender)
 
-    logger.debug("Reply from %s did not contain a clear APPROVE/REJECT keyword", sender)
+    logger.debug(
+        "Reply from %s (msg=%s) had no valid decision or .txt attachment",
+        sender, msg_id,
+    )
     return None
 
 
-def _decode_raw_message(msg: dict) -> bytes | None:
-    """
-    Gmail API returns message body in parts[].body.data (base64url encoded).
-    We reconstruct the raw MIME bytes for parsing.
-    """
-    try:
-        payload = msg.get("payload", {})
-        # Try top-level data first (non-multipart messages)
-        data = payload.get("body", {}).get("data", "")
-        if data:
-            return base64.urlsafe_b64decode(data + "==")
+# ── Gmail API payload helpers ─────────────────────────────────────────────────
 
-        # For multipart, reconstruct from parts
-        parts_bytes = _collect_parts_bytes(payload.get("parts", []))
-        if parts_bytes:
-            # Build a minimal raw message with headers so email.message_from_bytes works
-            headers = msg.get("payload", {}).get("headers", [])
-            header_str = "\r\n".join(f"{h['name']}: {h['value']}" for h in headers)
-            return (header_str + "\r\n\r\n").encode() + parts_bytes
+def _iter_parts(payload: dict):
+    """Recursively yield every part in a Gmail API message payload."""
+    yield payload
+    for part in payload.get("parts", []):
+        yield from _iter_parts(part)
 
-    except Exception as exc:
-        logger.debug("Could not decode message payload: %s", exc)
+
+def _log_attachment_filenames(payload: dict) -> None:
+    """Log every non-empty filename found in the payload parts for debugging."""
+    for part in _iter_parts(payload):
+        filename = part.get("filename", "")
+        if filename:
+            logger.debug("Attachment filename in reply: %r", filename)
+
+
+def _fetch_txt_attachment(service, msg_id: str, payload: dict) -> str | None:
+    """
+    Return the text content of the first valid .txt attachment, or None if absent.
+
+    A "valid .txt attachment" is a part whose filename ends exactly with ".txt"
+    (case-insensitive).  Files like "post.txt.rtf" do NOT qualify.
+
+    Small attachments may be inlined in body.data; larger ones arrive via
+    attachmentId and require a separate API call.
+
+    Returns None if no valid .txt attachment exists in the message.
+    """
+    for part in _iter_parts(payload):
+        filename = part.get("filename", "")
+        if not filename:
+            continue
+        if not filename.lower().endswith(".txt"):
+            logger.debug("Skipping non-.txt attachment: %r", filename)
+            continue
+        body = part.get("body", {})
+        # Inline data (small attachments)
+        inline_data = body.get("data", "")
+        if inline_data:
+            try:
+                return base64.urlsafe_b64decode(inline_data + "==").decode(
+                    "utf-8", errors="replace"
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to decode inline .txt attachment %r: %s", filename, exc
+                )
+                continue
+        # Remote attachment — fetch via separate API call
+        attachment_id = body.get("attachmentId", "")
+        if not attachment_id:
+            continue
+        try:
+            att = (
+                service.users()
+                .messages()
+                .attachments()
+                .get(userId="me", messageId=msg_id, id=attachment_id)
+                .execute()
+            )
+            data = att.get("data", "")
+            if data:
+                return base64.urlsafe_b64decode(data + "==").decode(
+                    "utf-8", errors="replace"
+                )
+            return ""
+        except Exception as exc:
+            logger.warning(
+                "Failed to fetch .txt attachment %r (msg=%s): %s",
+                filename, msg_id, exc,
+            )
     return None
 
 
-def _collect_parts_bytes(parts: list) -> bytes:
-    result = b""
-    for part in parts:
+def _extract_body_from_payload(payload: dict) -> str:
+    """
+    Extract the plain-text body from a Gmail API message payload.
+
+    Handles both non-multipart (top-level body.data) and multipart messages.
+    Skips parts that carry a filename (attachments).
+    """
+    for part in _iter_parts(payload):
+        if part.get("filename"):   # skip attachments
+            continue
+        if part.get("mimeType", "") != "text/plain":
+            continue
         data = part.get("body", {}).get("data", "")
         if data:
-            result += base64.urlsafe_b64decode(data + "==")
-        # Recurse into nested parts
-        nested = part.get("parts", [])
-        if nested:
-            result += _collect_parts_bytes(nested)
-    return result
-
-
-def _extract_body(mime: Message) -> str:
-    """Extract plain text body from a MIME message."""
-    if mime.is_multipart():
-        for part in mime.walk():
-            ctype = part.get_content_type()
-            disposition = str(part.get("Content-Disposition", ""))
-            if ctype == "text/plain" and "attachment" not in disposition:
-                charset = part.get_content_charset() or "utf-8"
-                try:
-                    return part.get_payload(decode=True).decode(charset, errors="replace")
-                except Exception:
-                    pass
-        return ""
-    else:
-        charset = mime.get_content_charset() or "utf-8"
-        try:
-            return mime.get_payload(decode=True).decode(charset, errors="replace")
-        except Exception:
-            return ""
-
-
-def _extract_txt_attachment(mime: Message) -> str:
-    """Return the text content of the first .txt attachment found, or empty string."""
-    if not mime.is_multipart():
-        return ""
-    for part in mime.walk():
-        disposition = str(part.get("Content-Disposition", ""))
-        filename = part.get_filename() or ""
-        if "attachment" in disposition and filename.lower().endswith(".txt"):
-            charset = part.get_content_charset() or "utf-8"
             try:
-                return part.get_payload(decode=True).decode(charset, errors="replace")
+                return base64.urlsafe_b64decode(data + "==").decode(
+                    "utf-8", errors="replace"
+                )
             except Exception:
                 pass
     return ""

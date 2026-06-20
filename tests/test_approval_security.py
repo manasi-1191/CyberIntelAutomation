@@ -4,7 +4,10 @@ Security tests for the approval workflow hardening:
 1. _is_authorized_sender — exact email address matching (no substring tricks)
 2. _extract_decision_from_body — strict first-line keyword parsing
 3. Collect process lock — prevents duplicate concurrent runs
+4. Attachment detection — .txt vs .rtf vs .txt.rtf; newest reply wins
 """
+import base64
+import logging
 import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -171,3 +174,155 @@ class TestCollectLock:
     def test_release_on_none_is_safe(self):
         from main import _release_collect_lock
         _release_collect_lock(None)  # must not raise
+
+
+# ── 4. Attachment detection ───────────────────────────────────────────────────
+
+def _b64(text: str) -> str:
+    return base64.urlsafe_b64encode(text.encode()).decode()
+
+
+def _svc_with_attachment(content: str) -> MagicMock:
+    """Mock Gmail service that returns `content` for any attachment fetch."""
+    svc = MagicMock()
+    svc.users().messages().attachments().get().execute.return_value = {
+        "data": _b64(content)
+    }
+    return svc
+
+
+class TestAttachmentDetection:
+    """
+    _parse_message and check_for_reply must correctly handle:
+    - .txt attachments (accepted — edited approval without APPROVE keyword)
+    - .rtf / .txt.rtf attachments (ignored)
+    - Invalid reply followed by a valid .txt reply in the same thread (newest wins)
+    """
+
+    APPROVER = "approver@example.com"
+
+    def _msg(self, msg_id: str, payload: dict) -> dict:
+        """Wrap a payload dict in a minimal Gmail message dict."""
+        payload.setdefault("headers", [{"name": "From", "value": self.APPROVER}])
+        return {"id": msg_id, "payload": payload}
+
+    # ── 1. Valid .txt attachment alone approves without any keyword ───────────
+
+    def test_txt_attachment_approves_without_keyword(self):
+        from emailer.approval_poller import _parse_message
+        payload = {
+            "mimeType": "multipart/mixed",
+            "parts": [
+                {"mimeType": "text/plain", "filename": "", "body": {"data": _b64("No keyword.")}},
+                {"mimeType": "text/plain", "filename": "edited_post.txt",
+                 "body": {"attachmentId": "att-txt"}},
+            ],
+        }
+        msg = self._msg("m1", payload)
+        svc = _svc_with_attachment("My edited LinkedIn post.")
+        result = _parse_message(svc, msg, self.APPROVER)
+        assert result is not None
+        assert result.status == "edited_approved"
+        assert result.content == "My edited LinkedIn post."
+
+    # ── 2. .rtf attachment is ignored — no approval ───────────────────────────
+
+    def test_rtf_attachment_is_ignored(self):
+        from emailer.approval_poller import _parse_message
+        payload = {
+            "mimeType": "multipart/mixed",
+            "parts": [
+                {"mimeType": "text/plain", "filename": "", "body": {"data": _b64("No keyword.")}},
+                {"mimeType": "application/rtf", "filename": "post.rtf",
+                 "body": {"attachmentId": "att-rtf"}},
+            ],
+        }
+        msg = self._msg("m2", payload)
+        result = _parse_message(MagicMock(), msg, self.APPROVER)
+        assert result is None  # .rtf ignored, body has no keyword
+
+    # ── 3. "post.txt.rtf" is NOT treated as a .txt attachment ─────────────────
+
+    def test_txt_rtf_not_treated_as_txt(self):
+        from emailer.approval_poller import _parse_message
+        payload = {
+            "mimeType": "multipart/mixed",
+            "parts": [
+                {"mimeType": "text/plain", "filename": "", "body": {"data": _b64("")}},
+                {"mimeType": "application/rtf", "filename": "edited_post.txt.rtf",
+                 "body": {"attachmentId": "att-bad"}},
+            ],
+        }
+        msg = self._msg("m3", payload)
+        result = _parse_message(MagicMock(), msg, self.APPROVER)
+        assert result is None  # ends in .rtf, not .txt
+
+    # ── 4. Invalid reply then valid .txt reply — newest (.txt) wins ───────────
+
+    def test_rtf_reply_then_txt_reply_returns_edited_approved(self):
+        from emailer.approval_poller import check_for_reply
+
+        sent_msg = {
+            "id": "sent-001",
+            "payload": {
+                "headers": [{"name": "From", "value": "system@example.com"}],
+                "mimeType": "text/plain",
+                "body": {"data": _b64("Please reply.")},
+            },
+        }
+        rtf_reply = {
+            "id": "reply-001",
+            "payload": {
+                "mimeType": "multipart/mixed",
+                "headers": [{"name": "From", "value": self.APPROVER}],
+                "parts": [
+                    {"mimeType": "text/plain", "filename": "", "body": {"data": _b64("")}},
+                    {"mimeType": "application/rtf", "filename": "post.rtf",
+                     "body": {"attachmentId": "att-rtf"}},
+                ],
+            },
+        }
+        txt_reply = {
+            "id": "reply-002",
+            "payload": {
+                "mimeType": "multipart/mixed",
+                "headers": [{"name": "From", "value": self.APPROVER}],
+                "parts": [
+                    {"mimeType": "text/plain", "filename": "", "body": {"data": _b64("")}},
+                    {"mimeType": "text/plain", "filename": "edited_post.txt",
+                     "body": {"attachmentId": "att-txt"}},
+                ],
+            },
+        }
+
+        svc = _svc_with_attachment("My final post.")
+        svc.users().threads().get().execute.return_value = {
+            "messages": [sent_msg, rtf_reply, txt_reply]
+        }
+
+        with patch("emailer.approval_poller.get_gmail_service", return_value=svc), \
+             patch("emailer.approval_poller.settings") as mock_s:
+            mock_s.approval_email_recipient = self.APPROVER
+            result = check_for_reply("thread-xyz", "sent-001")
+
+        assert result.status == "edited_approved"
+        assert result.content == "My final post."
+
+    # ── 5. Empty body with .txt attachment still approves ─────────────────────
+
+    def test_empty_body_with_txt_attachment_approves(self):
+        from emailer.approval_poller import _parse_message
+        payload = {
+            "mimeType": "multipart/mixed",
+            "parts": [
+                {"mimeType": "text/plain", "filename": "", "body": {"data": _b64("")}},
+                {"mimeType": "text/plain", "filename": "post.txt",
+                 "body": {"attachmentId": "att-txt"}},
+            ],
+        }
+        msg = self._msg("m5", payload)
+        svc = _svc_with_attachment("Post content from attachment.")
+        result = _parse_message(svc, msg, self.APPROVER)
+        assert result is not None
+        assert result.status == "edited_approved"
+        assert result.content == "Post content from attachment."
