@@ -28,11 +28,11 @@ The approval email gate is mandatory — nothing is published without an explici
 ## Client workflow
 
 1. Receive the daily briefing email.
-2. Review the AI-generated summary.
+2. Review the briefing (Executive Summary, Detailed Summary) and the **LinkedIn Preview** shown in the email — the Preview is the exact text that will be published.
 3. Reply with one of:
-   - `APPROVE` — posts the AI summary to LinkedIn as-is.
+   - `APPROVE` — publishes the LinkedIn Preview exactly as shown in the approval email.
    - `REJECT` — skips today's post entirely.
-   - Attach a `.txt` file with your edited post — publishes your version instead.
+   - Attach a `.txt` file with your own wording — publishes your version instead of the Preview.
 4. Done. The watcher detects your reply within 10 minutes and acts on it.
 
 No login, no commands, no manual steps needed after setup.
