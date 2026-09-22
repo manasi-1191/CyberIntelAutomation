@@ -31,8 +31,6 @@ The approval email includes an Executive Summary, a Detailed Summary, and the ex
 
 ![Example LinkedIn preview](docs/example-output.png)
 
-*(Screenshot placeholder — replace with a real approval email / LinkedIn preview before sharing.)*
-
 ---
 
 ## Owner workflow
