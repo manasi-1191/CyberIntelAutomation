@@ -1,4 +1,4 @@
-# CyberIntel Automation — Client Handoff Guide
+# CyberIntel Automation — Setup Guide
 
 This document walks through everything you need to set up and operate the
 CyberIntel Automation system on your own machine.

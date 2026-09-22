@@ -7,7 +7,7 @@ This document explains how to schedule the CyberIntel pipeline so that:
   **APPROVE**, **REJECT**, or an attached `.txt` edit publishes (or blocks)
   the LinkedIn post with no manual steps.
 
-The client's only action is replying to the daily email.
+Your only action is replying to the daily email.
 
 ---
 

@@ -1,6 +1,6 @@
 # CyberIntel Automation
 
-Automated daily cybersecurity intelligence pipeline. Collects threats from CISA, NVD, and RSS feeds, generates an AI-written briefing, sends it for approval by email, and — after an **APPROVE** reply — publishes the post to LinkedIn automatically.
+A human-in-the-loop cybersecurity intelligence pipeline. Collection and AI summarization are fully automatic — the pipeline pulls threats from CISA, NVD, and RSS feeds and drafts a briefing plus a LinkedIn preview — but nothing is ever published. Every run ends with an approval email, and a post only goes to LinkedIn after you reply **APPROVE**.
 
 ---
 
@@ -25,7 +25,17 @@ The approval email gate is mandatory — nothing is published without an explici
 
 ---
 
-## Client workflow
+## Example output
+
+The approval email includes an Executive Summary, a Detailed Summary, and the exact LinkedIn Preview that will be published on `APPROVE`.
+
+![Example LinkedIn preview](docs/example-output.png)
+
+*(Screenshot placeholder — replace with a real approval email / LinkedIn preview before sharing.)*
+
+---
+
+## Owner workflow
 
 1. Receive the daily briefing email.
 2. Review the briefing (Executive Summary, Detailed Summary) and the **LinkedIn Preview** shown in the email — the Preview is the exact text that will be published.
@@ -55,7 +65,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Fill in your credentials in `.env`. See [CLIENT_HANDOFF.md](CLIENT_HANDOFF.md) for a step-by-step walkthrough of every field.
+Fill in your credentials in `.env`. See [SETUP_GUIDE.md](SETUP_GUIDE.md) for a step-by-step walkthrough of every field.
 
 Set these in `.env`:
 
@@ -121,7 +131,7 @@ python main.py check-approval --report-id 2026-06-15
 
 ## Setup guides
 
-- [**Client handoff — full setup walkthrough**](CLIENT_HANDOFF.md)
+- [**Setup guide — full walkthrough**](SETUP_GUIDE.md)
 - [LinkedIn credentials and OAuth flow](LINKEDIN_SETUP.md)
 - [Automatic scheduling and crontab](docs/SCHEDULING.md)
 
